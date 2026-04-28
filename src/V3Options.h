@@ -305,6 +305,7 @@ private:
     bool m_traceStructs = false;    // main switch: --trace-structs
     bool m_noTraceTop = false;      // main switch: --no-trace-top
     bool m_traceUnderscore = false; // main switch: --trace-underscore
+    bool m_traceCausality = false;  // main switch: --trace-causality
     bool m_underlineZero = false;   // main switch: --underline-zero; undocumented old Verilator 2
     bool m_verilate = true;         // main switch: --verilate
     bool m_vpi = false;             // main switch: --vpi
@@ -352,6 +353,8 @@ private:
     int         m_traceDepth = 0;   // main switch: --trace-depth
     int         m_traceMaxArray = 32;  // main switch: --trace-max-array
     int         m_traceMaxWidth = 4096; // main switch: --trace-max-width
+    string      m_traceCausalityOutput;  // main switch: --trace-causality-output
+    string      m_traceCausalitySinks;  // main switch: --trace-causality-sinks
     int         m_unrollCount = 64;  // main switch: --unroll-count
     int         m_unrollLimit = 16384;  // main switch: --unroll-limit
     int         m_unrollStmts = 30000;  // main switch: --unroll-stmts
@@ -569,6 +572,7 @@ public:
     bool traceParams() const { return m_traceParams; }
     bool traceStructs() const { return m_traceStructs; }
     bool traceUnderscore() const { return m_traceUnderscore; }
+    bool traceCausality() const { return m_traceCausality; }
     bool main() const { return m_main; }
     bool outFormatOk() const { return m_outFormatOk; }
     bool jsonOnly() const { return m_jsonOnly; }
@@ -647,6 +651,8 @@ public:
     int traceDepth() const { return m_traceDepth; }
     int traceMaxArray() const { return m_traceMaxArray; }
     int traceMaxWidth() const { return m_traceMaxWidth; }
+    string traceCausalityOutput() const { return m_traceCausalityOutput; }
+    string traceCausalitySinks() const { return m_traceCausalitySinks; }
     bool useTraceParallel() const {
         return trace() && traceEnabledVcd() && (threads() > 1 || hierChild() > 1);
     }

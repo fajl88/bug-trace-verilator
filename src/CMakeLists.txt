@@ -188,6 +188,7 @@ set(HEADERS
     V3ThreadPool.h
     V3Timing.h
     V3Trace.h
+    V3TraceCausality.h
     V3TraceDecl.h
     V3Tristate.h
     V3Udp.h
@@ -361,6 +362,7 @@ set(COMMON_SOURCES
     V3ThreadPool.cpp
     V3Timing.cpp
     V3Trace.cpp
+    V3TraceCausality.cpp
     V3TraceDecl.cpp
     V3Tristate.cpp
     V3Udp.cpp

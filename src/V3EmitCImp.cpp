@@ -596,6 +596,8 @@ class EmitCTrace final : public EmitCFunc {
     const std::unique_ptr<EmitCTraceTypes> m_emitTypesp{m_slow ? new EmitCTraceTypes{} : nullptr};
     V3UniqueNames m_uniqueNames;  // Generates unique file names
     const std::string m_fileBaseName = EmitCUtil::topClassName() + "_" + protect("_Trace");
+    std::map<uint32_t, const AstTraceDecl*> m_traceDeclByCode;
+    std::map<uint32_t, const AstTraceInc*> m_traceIncByCode;
 
     // METHODS
     void openNextOutputFile() {
@@ -611,22 +613,81 @@ class EmitCTrace final : public EmitCFunc {
         m_lazyDecls.reset();
     }
 
+    const AstTraceDecl* findTraceDeclByCode(uint32_t code) const {
+        const auto it = m_traceDeclByCode.find(code);
+        return it == m_traceDeclByCode.end() ? nullptr : it->second;
+    }
+    const AstTraceInc* findTraceIncByCode(uint32_t code) const {
+        const auto it = m_traceIncByCode.find(code);
+        return it == m_traceIncByCode.end() ? nullptr : it->second;
+    }
+
+    std::string traceScalarType(const AstTraceDecl* declp, bool& emitWidth) const {
+        emitWidth = true;
+        if (declp->dtypep()->basicp()->isDouble()) {
+            emitWidth = false;
+            return "Double";
+        }
+        if (declp->isWide()) return "WData";
+        if (declp->isQuad()) return "QData";
+        if (declp->widthMin() > 16) return "IData";
+        if (declp->widthMin() > 8) return "SData";
+        if (declp->widthMin() > 1) return "CData";
+        if (declp->dtypep()->basicp()->isEvent()) {
+            emitWidth = false;
+            return "Event";
+        }
+        emitWidth = false;
+        return "Bit";
+    }
+
+    void emitTraceDeclValue(const AstTraceDecl* declp) {
+        if (const AstVarRef* const varrefp = VN_CAST(declp->valuep(), VarRef)) {
+            const AstVar* const varp = varrefp->varp();
+            if (varp->isEvent()) puts("&");
+            puts("(");
+            iterateConst(const_cast<AstVarRef*>(varrefp));
+            if (varp->isSc()) puts(".read()");
+            puts(")");
+        } else {
+            puts("(");
+            iterateConst(declp->valuep());
+            puts(")");
+        }
+    }
+
+    void emitPredChangedExpr(uint32_t predCode, uint32_t sinkBaseCode) {
+        const AstTraceInc* const predIncp = findTraceIncByCode(predCode);
+        if (!predIncp || predIncp->declp()->arrayRange().ranged()) {
+            puts("false");
+            return;
+        }
+        bool emitWidth = true;
+        const AstTraceDecl* const predDeclp = predIncp->declp();
+        const std::string stype = traceScalarType(predDeclp, emitWidth);
+        puts("bufp->causalityChanged" + stype + "(oldp+"
+             + cvtToStr(predCode - sinkBaseCode) + ", ");
+        emitTraceValue(predIncp, -1);
+        if (emitWidth) puts("," + cvtToStr(predDeclp->widthMin()));
+        puts(")");
+    }
+
     bool emitTraceIsScBv(const AstTraceInc* nodep) {
-        const AstVarRef* const varrefp = VN_CAST(nodep->declp()->valuep(), VarRef);
+        const AstVarRef* const varrefp = VN_CAST(nodep->valuep(), VarRef);
         if (!varrefp) return false;
         const AstVar* const varp = varrefp->varp();
         return varp->isSc() && varp->isScBv();
     }
 
     bool emitTraceIsScBigUint(const AstTraceInc* nodep) {
-        const AstVarRef* const varrefp = VN_CAST(nodep->declp()->valuep(), VarRef);
+        const AstVarRef* const varrefp = VN_CAST(nodep->valuep(), VarRef);
         if (!varrefp) return false;
         const AstVar* const varp = varrefp->varp();
         return varp->isSc() && varp->isScBigUint();
     }
 
     bool emitTraceIsScUint(const AstTraceInc* nodep) {
-        const AstVarRef* const varrefp = VN_CAST(nodep->declp()->valuep(), VarRef);
+        const AstVarRef* const varrefp = VN_CAST(nodep->valuep(), VarRef);
         if (!varrefp) return false;
         const AstVar* const varp = varrefp->varp();
         return varp->isSc() && (varp->isScUint() || varp->isScUintBool());
@@ -753,10 +814,18 @@ class EmitCTrace final : public EmitCFunc {
             stype = "Bit";
             emitWidth = false;
         }
-        putns(nodep, "bufp->" + func + stype);
-
         const uint32_t offset = (arrayindex < 0) ? 0 : (arrayindex * nodep->declp()->widthWords());
         const uint32_t code = nodep->declp()->code() + offset;
+        if (v3Global.opt.traceCausality() && nodep->traceType() != VTraceType::CONSTANT) {
+            const std::string changedVar = "__Vtrace_changed_" + cvtToStr(code);
+            puts("const bool " + changedVar + " = bufp->causalityChanged" + stype + "(oldp+");
+            puts(cvtToStr(code - nodep->baseCode()));
+            puts(",");
+            emitTraceValue(nodep, arrayindex);
+            if (emitWidth) puts("," + cvtToStr(nodep->declp()->widthMin()));
+            puts(");\n");
+        }
+        putns(nodep, "bufp->" + func + stype);
         // Note: Both VTraceType::CHANGE and VTraceType::FULL use the 'full' methods
         puts("(oldp+");
         puts(cvtToStr(code - nodep->baseCode()));
@@ -768,6 +837,34 @@ class EmitCTrace final : public EmitCFunc {
         emitTraceValue(nodep, arrayindex);
         if (emitWidth) puts("," + cvtToStr(nodep->declp()->widthMin()));
         puts(");\n");
+        if (v3Global.opt.traceCausality() && nodep->traceType() != VTraceType::CONSTANT) {
+            const auto& predCodes = nodep->declp()->causalityPredCodes();
+            puts("if (VL_UNLIKELY(__Vtrace_changed_" + cvtToStr(code) + ")) {\n");
+            if (!predCodes.empty()) {
+                puts("static const uint32_t __Vpred_codes[] = {");
+                for (size_t idx = 0; idx < predCodes.size(); ++idx) {
+                    if (idx) puts(",");
+                    puts(cvtToStr(predCodes[idx]));
+                }
+                puts("};\n");
+                puts("bool __Vpred_changed[" + cvtToStr(predCodes.size()) + "] = {");
+                for (size_t idx = 0; idx < predCodes.size(); ++idx) {
+                    if (idx) puts(",");
+                    emitPredChangedExpr(predCodes[idx], nodep->baseCode());
+                }
+                puts("};\n");
+                puts("bufp->causalityEmit(vlSymsp->_vm_contextp__->time(), ");
+                puts(cvtToStr(code));
+                puts(", __Vpred_codes, __Vpred_changed, ");
+                puts(cvtToStr(predCodes.size()));
+                puts(");\n");
+            } else {
+                puts("bufp->causalityEmit(vlSymsp->_vm_contextp__->time(), ");
+                puts(cvtToStr(code));
+                puts(", nullptr, nullptr, 0);\n");
+            }
+            puts("}\n");
+        }
     }
 
     void emitTraceValue(const AstTraceInc* nodep, int arrayindex) {
@@ -846,6 +943,10 @@ class EmitCTrace final : public EmitCFunc {
         putns(nodep, "VL_TRACE_POP_PREFIX(tracep);\n");
     }
     void visit(AstTraceDecl* nodep) override {
+        if (v3Global.opt.traceCausality() && nodep->codeAssigned() && !nodep->inDtypeFunc()
+            && !nodep->arrayRange().ranged()) {
+            m_traceDeclByCode.emplace(nodep->code(), nodep);
+        }
         const int enumNum = emitTraceDeclDType(nodep->dtypep());
         putns(nodep, "");
         if (nodep->arrayRange().ranged()) {
@@ -871,6 +972,15 @@ class EmitCTrace final : public EmitCFunc {
     explicit EmitCTrace(bool slow)
         : m_slow{slow} {
         m_modp = v3Global.rootp()->topModulep();
+        if (v3Global.opt.traceCausality()) {
+            v3Global.rootp()->foreach([this](AstTraceInc* incp) {
+                if (incp->declp()->arrayRange().ranged()) return;
+                if (incp->traceType() == VTraceType::CONSTANT) return;
+                if (incp->declp()->inDtypeFunc()) return;
+                if (incp->declp()->dtypeCallp()) return;
+                m_traceIncByCode.emplace(incp->declp()->code(), incp);
+            });
+        }
         // Open output file
         openNextOutputFile();
         // Emit functions

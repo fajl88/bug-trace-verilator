@@ -594,6 +594,17 @@ class EmitCModel final : public EmitCFunc {
              + ", " + (v3Global.opt.libCreate().empty() ? "false" : "true")  //
              + ", " + std::to_string(v3Global.rootp()->nTraceCodes())  //
              + ");\n");
+        if (v3Global.opt.traceCausality()) {
+            const std::string staticGraph
+                = v3Global.opt.traceCausalityOutput().empty()
+                      ? v3Global.opt.makeDir() + "/" + v3Global.opt.prefix()
+                            + "__trace_static_graph.json"
+                      : v3Global.opt.traceCausalityOutput();
+            const std::string eventsPath
+                = v3Global.opt.makeDir() + "/" + v3Global.opt.prefix() + "__trace_events.jsonl";
+            puts(/**/ "stfp->spTrace()->configureCausality("s + "\"" + eventsPath + "\", \""
+                 + staticGraph + "\", \"" + v3Global.opt.traceCausalitySinks() + "\");\n");
+        }
         puts(/**/ topModNameProtected + "__" + protect("trace_register")
              + "(&(vlSymsp->TOP), stfp->spTrace());\n");
         puts("}\n");

@@ -46,6 +46,7 @@
 #include "V3Stats.h"
 #include "V3UniqueNames.h"
 
+#include <fstream>
 #include <limits>
 #include <map>
 #include <set>
@@ -222,6 +223,22 @@ class TraceVisitor final : public VNVisitor {
         m_ifaceMemberVscps;
 
     // METHODS
+
+    static std::string jsonEscape(const std::string& text) {
+        std::string out;
+        out.reserve(text.size());
+        for (const char ch : text) {
+            switch (ch) {
+            case '\\': out += "\\\\"; break;
+            case '"': out += "\\\""; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default: out += ch; break;
+            }
+        }
+        return out;
+    }
 
     void detectDuplicates() {
         UINFO(9, "Finding duplicates");
@@ -1088,6 +1105,65 @@ class TraceVisitor final : public VNVisitor {
         createCleanupFunction();
     }
 
+    void resolveCausalityPredCodesAndEmitGraph(AstNetlist* nodep) {
+        if (!v3Global.opt.traceCausality()) return;
+
+        std::unordered_map<AstVarScope*, std::vector<AstTraceDecl*>> declsByVscp;
+        std::map<uint32_t, AstTraceDecl*> declByCode;
+        std::set<std::pair<uint32_t, uint32_t>> edges;
+
+        nodep->foreach([&](AstTraceDecl* declp) {
+            if (!declp->codeAssigned() || declp->inDtypeFunc() || declp->arrayRange().ranged()) return;
+            declByCode.emplace(declp->code(), declp);
+            if (AstVarScope* const sourcep = declp->causalitySourceVscp()) {
+                declsByVscp[sourcep].push_back(declp);
+            }
+        });
+
+        nodep->foreach([&](AstTraceDecl* declp) {
+            if (!declp->codeAssigned() || declp->inDtypeFunc() || declp->arrayRange().ranged()) return;
+            std::set<uint32_t> predCodes;
+            for (AstVarScope* const predp : declp->causalityPredVscps()) {
+                const auto it = declsByVscp.find(predp);
+                if (it == declsByVscp.end()) continue;
+                for (AstTraceDecl* const predDeclp : it->second) predCodes.insert(predDeclp->code());
+            }
+            declp->causalityPredCodesClear();
+            for (const uint32_t predCode : predCodes) {
+                declp->causalityPredCodeAdd(predCode);
+                edges.emplace(predCode, declp->code());
+            }
+            declp->causalityPredVscpsClear();
+            declp->causalitySourceVscp(nullptr);
+        });
+
+        const std::string outputPath
+            = v3Global.opt.traceCausalityOutput().empty()
+                  ? v3Global.opt.makeDir() + "/" + v3Global.opt.prefix() + "__trace_static_graph.json"
+                  : v3Global.opt.traceCausalityOutput();
+        std::ofstream os{outputPath};
+        if (!os) return;
+
+        os << "{\"format\":\"trace_causality_static_graph\",\"version\":1,\"nodes\":[";
+        bool first = true;
+        for (const auto& pair : declByCode) {
+            if (!first) os << ",";
+            first = false;
+            os << "{\"id\":" << pair.first << ",\"display_name\":\""
+               << jsonEscape(pair.second->showname()) << "\"}";
+        }
+        os << "],\"edges\":[";
+        first = true;
+        for (const auto& edge : edges) {
+            if (!first) os << ",";
+            first = false;
+            os << "{\"src\":" << edge.first << ",\"dst\":" << edge.second << "}";
+        }
+        os << "]}\n";
+
+        nodep->foreach([](AstVarScope* vscp) { vscp->causalityPredVscpsClear(); });
+    }
+
     TraceCFuncVertex* getCFuncVertexp(AstCFunc* nodep) {
         TraceCFuncVertex* vertexp
             = nodep->user1() ? nodep->user1u().toGraphVertex()->cast<TraceCFuncVertex>() : nullptr;
@@ -1121,6 +1197,7 @@ class TraceVisitor final : public VNVisitor {
 
         // Create the trace functions and insert them into the tree
         createTraceFunctions();
+        resolveCausalityPredCodesAndEmitGraph(nodep);
 
         // Save number of trace codes used
         nodep->nTraceCodes(m_code);

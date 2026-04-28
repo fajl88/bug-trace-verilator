@@ -423,6 +423,51 @@ void VerilatedTrace<VL_SUB_T, VL_BUF_T>::addCleanupCb(cleanupCb_t cb, void* user
 }
 
 template <>
+void VerilatedTrace<VL_SUB_T, VL_BUF_T>::configureCausality(const std::string& outputPath,
+                                                             const std::string& staticGraphPath,
+                                                             const std::string& sinkFilter)
+    VL_MT_SAFE {
+    const VerilatedLockGuard lock{m_mutex};
+    m_causalityOutputPath = outputPath;
+    m_causalityStaticGraphPath = staticGraphPath;
+    m_causalitySinksFilter = sinkFilter;
+    m_causalityEnabled = !m_causalityOutputPath.empty();
+    if (!m_causalityEnabled) return;
+    if (m_causalityStream.is_open()) m_causalityStream.close();
+    m_causalityStream.open(m_causalityOutputPath.c_str(), std::ios::out | std::ios::trunc);
+    if (!m_causalityStream.is_open()) {
+        m_causalityEnabled = false;
+        return;
+    }
+    m_causalityStream << "{\"event\":\"trace_causality_header\",\"version\":1,"
+                     << "\"static_graph\":\"" << m_causalityStaticGraphPath
+                     << "\",\"sink_filter\":\"" << m_causalitySinksFilter << "\"}\n";
+    m_causalityStream.flush();
+}
+
+template <>
+void VerilatedTrace<VL_SUB_T, VL_BUF_T>::causalityEmit(uint64_t timeui, uint32_t sinkCode,
+                                                       const uint32_t* predCodes,
+                                                       const bool* predChanged,
+                                                       uint32_t predCount)
+    VL_MT_SAFE_EXCLUDES(m_mutex) {
+    if (!m_causalityEnabled) return;
+    const std::lock_guard<std::mutex> lock{m_causalityMutex};
+    if (!m_causalityStream.is_open()) return;
+    m_causalityStream << "{\"time\":" << timeui << ",\"sink_id\":" << sinkCode
+                      << ",\"active_predecessors\":[";
+    bool first = true;
+    for (uint32_t idx = 0; idx < predCount; ++idx) {
+        if (!predChanged[idx]) continue;
+        if (!first) m_causalityStream << ",";
+        first = false;
+        m_causalityStream << predCodes[idx];
+    }
+    m_causalityStream << "],\"predicates_checked\":" << predCount
+                      << ",\"value_class\":\"known\"}\n";
+}
+
+template <>
 void VerilatedTrace<VL_SUB_T, VL_BUF_T>::initLib(const std::string& name) VL_MT_SAFE {
     // Note it's possible the instance doesn't exist if the lib was compiled without tracing
     void* const prevInitUserp = m_initUserp;

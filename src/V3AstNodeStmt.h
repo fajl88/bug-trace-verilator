@@ -1268,8 +1268,10 @@ class AstTraceDecl final : public AstNodeStmt {
     // Expression being traced - Moved to AstTraceInc by V3Trace
     // @astgen op1 := valuep : Optional[AstNodeExpr]
     //
+    // Source signal for causality metadata.
     // @astgen ptr := m_dtypeCallp: Optional[AstCCall] // Type init function call
     // @astgen ptr := m_dtypeDeclp: Optional[AstTraceDecl] // CCall TraceDecl which replaces this
+    AstVarScope* m_causalitySourceVscp = nullptr;  // Source signal for causality metadata
     uint32_t m_code{std::numeric_limits<uint32_t>::max()};  // Trace identifier code
     uint32_t m_fidx{0};  // Trace function index
     const string m_showname;  // Name of variable
@@ -1279,6 +1281,8 @@ class AstTraceDecl final : public AstNodeStmt {
     const VDirection m_declDirection;  // Declared direction input/output etc
     const bool m_inDtypeFunc;  // Trace decl inside type init function
     int m_codeInc{0};  // Code increment for type
+    std::vector<AstVarScope*> m_causalityPredVscps;  // Static predecessors before trace code assign
+    std::vector<uint32_t> m_causalityPredCodes;  // Final predecessor trace codes
 public:
     AstTraceDecl(FileLine* fl, const string& showname,
                  AstVar* varp,  // For input/output state etc
@@ -1326,6 +1330,25 @@ public:
     AstTraceDecl* dtypeDeclp() const { return m_dtypeDeclp; }
     void dtypeDeclp(AstTraceDecl* const declp) { m_dtypeDeclp = declp; }
     bool inDtypeFunc() const { return m_inDtypeFunc; }
+    AstVarScope* causalitySourceVscp() const { return m_causalitySourceVscp; }
+    void causalitySourceVscp(AstVarScope* const vscp) { m_causalitySourceVscp = vscp; }
+    const std::vector<AstVarScope*>& causalityPredVscps() const { return m_causalityPredVscps; }
+    void causalityPredVscpsClear() { m_causalityPredVscps.clear(); }
+    void causalityPredVscpAdd(AstVarScope* predp) {
+        if (!predp) return;
+        for (AstVarScope* const existingp : m_causalityPredVscps) {
+            if (existingp == predp) return;
+        }
+        m_causalityPredVscps.push_back(predp);
+    }
+    const std::vector<uint32_t>& causalityPredCodes() const { return m_causalityPredCodes; }
+    void causalityPredCodesClear() { m_causalityPredCodes.clear(); }
+    void causalityPredCodeAdd(uint32_t code) {
+        for (const uint32_t existing : m_causalityPredCodes) {
+            if (existing == code) return;
+        }
+        m_causalityPredCodes.push_back(code);
+    }
 };
 class AstTraceInc final : public AstNodeStmt {
     // Trace point dump

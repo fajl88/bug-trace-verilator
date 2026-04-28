@@ -108,6 +108,7 @@
 #include "V3ThreadPool.h"
 #include "V3Timing.h"
 #include "V3Trace.h"
+#include "V3TraceCausality.h"
 #include "V3TraceDecl.h"
 #include "V3Tristate.h"
 #include "V3Udp.h"
@@ -411,6 +412,8 @@ static void process() {
             // Move assignments/sensitives into a SBLOCK for each unique sensitivity list
             // (May convert some ALWAYS to combo blocks, so should be before V3Gate step.)
             V3Active::activeAll(v3Global.rootp());
+
+            if (v3Global.opt.traceCausality()) V3TraceCausality::causalityAll(v3Global.rootp());
 
             // Split single ALWAYS blocks into multiple blocks for better ordering chances
             if (v3Global.opt.fSplit()) V3Split::splitAll(v3Global.rootp());

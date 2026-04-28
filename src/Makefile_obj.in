@@ -341,6 +341,7 @@ RAW_OBJS_PCH_ASTNOMT = \
   V3Task.o \
   V3Timing.o \
   V3Trace.o \
+  V3TraceCausality.o \
   V3TraceDecl.o \
   V3Tristate.o \
   V3Udp.o \

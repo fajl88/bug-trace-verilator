@@ -28,7 +28,9 @@
 
 #include <bitset>
 #include <condition_variable>
+#include <fstream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <type_traits>
 #include <map>
@@ -228,6 +230,12 @@ private:
     bool m_didSomeDump = false;  // Did at least one dump (i.e.: m_timeLastDump is valid)
     VerilatedContext* m_contextp = nullptr;  // The context used by the traced models
     std::set<const VerilatedModel*> m_models;  // The collection of models being traced
+    bool m_causalityEnabled = false;  // Enable deterministic causality sidecar logging
+    std::string m_causalityOutputPath;  // Runtime event sidecar path
+    std::string m_causalityStaticGraphPath;  // Compile-time static graph path
+    std::string m_causalitySinksFilter;  // Optional sink filter text
+    std::ofstream m_causalityStream;  // Runtime event stream
+    mutable std::mutex m_causalityMutex;  // Separate lock to avoid trace re-entrancy deadlocks
 
     void addCallbackRecord(std::vector<CallbackRecord>& cbVec, CallbackRecord&& cbRec)
         VL_MT_SAFE_EXCLUDES(m_mutex);
@@ -333,6 +341,11 @@ public:
     void addChgCb(dumpCb_t cb, uint32_t fidx, void* userp) VL_MT_SAFE;
     void addCleanupCb(cleanupCb_t cb, void* userp) VL_MT_SAFE;
     void initLib(const std::string& name) VL_MT_UNSAFE;
+    void configureCausality(const std::string& outputPath, const std::string& staticGraphPath,
+                            const std::string& sinkFilter) VL_MT_SAFE;
+    bool causalityEnabled() const VL_MT_SAFE { return m_causalityEnabled; }
+    void causalityEmit(uint64_t timeui, uint32_t sinkCode, const uint32_t* predCodes,
+                      const bool* predChanged, uint32_t predCount) VL_MT_SAFE_EXCLUDES(m_mutex);
 };
 
 //=============================================================================
@@ -378,6 +391,11 @@ public:
     // duck-typed void emitDouble(uint32_t code, double newval) = 0;
 
     VL_ATTR_ALWINLINE uint32_t* oldp(uint32_t code) { return m_sigs_oldvalp + code; }
+    bool causalityEnabled() const { return this->m_owner.causalityEnabled(); }
+    void causalityEmit(uint64_t timeui, uint32_t sinkCode, const uint32_t* predCodes,
+                      const bool* predChanged, uint32_t predCount) {
+        this->m_owner.causalityEmit(timeui, sinkCode, predCodes, predChanged, predCount);
+    }
 
     // Write to previous value buffer value and emit trace entry.
     void fullBit(uint32_t* oldp, CData newval);
@@ -395,23 +413,55 @@ public:
         const uint32_t diff = *oldp ^ newval;
         if (VL_UNLIKELY(diff)) fullBit(oldp, newval);
     }
+    VL_ATTR_ALWINLINE bool causalityChangedBit(uint32_t* oldp, CData newval) {
+        return (*oldp ^ newval) != 0;
+    }
+    VL_ATTR_ALWINLINE bool causalityChangedBit(uint32_t* oldp, CData newval, int) {
+        return causalityChangedBit(oldp, newval);
+    }
     VL_ATTR_ALWINLINE void chgCData(uint32_t* oldp, CData newval, int bits) {
         const uint32_t diff = *oldp ^ newval;
         if (VL_UNLIKELY(diff)) fullCData(oldp, newval, bits);
+    }
+    VL_ATTR_ALWINLINE bool causalityChangedCData(uint32_t* oldp, CData newval) {
+        return (*oldp ^ newval) != 0;
+    }
+    VL_ATTR_ALWINLINE bool causalityChangedCData(uint32_t* oldp, CData newval, int) {
+        return causalityChangedCData(oldp, newval);
     }
     VL_ATTR_ALWINLINE void chgSData(uint32_t* oldp, SData newval, int bits) {
         const uint32_t diff = *oldp ^ newval;
         if (VL_UNLIKELY(diff)) fullSData(oldp, newval, bits);
     }
+    VL_ATTR_ALWINLINE bool causalityChangedSData(uint32_t* oldp, SData newval) {
+        return (*oldp ^ newval) != 0;
+    }
+    VL_ATTR_ALWINLINE bool causalityChangedSData(uint32_t* oldp, SData newval, int) {
+        return causalityChangedSData(oldp, newval);
+    }
     VL_ATTR_ALWINLINE void chgIData(uint32_t* oldp, IData newval, int bits) {
         const uint32_t diff = *oldp ^ newval;
         if (VL_UNLIKELY(diff)) fullIData(oldp, newval, bits);
+    }
+    VL_ATTR_ALWINLINE bool causalityChangedIData(uint32_t* oldp, IData newval) {
+        return (*oldp ^ newval) != 0;
+    }
+    VL_ATTR_ALWINLINE bool causalityChangedIData(uint32_t* oldp, IData newval, int) {
+        return causalityChangedIData(oldp, newval);
     }
     VL_ATTR_ALWINLINE void chgQData(uint32_t* oldp, QData newval, int bits) {
         QData old;
         std::memcpy(&old, oldp, sizeof(old));
         const uint64_t diff = old ^ newval;
         if (VL_UNLIKELY(diff)) fullQData(oldp, newval, bits);
+    }
+    VL_ATTR_ALWINLINE bool causalityChangedQData(uint32_t* oldp, QData newval) {
+        QData old;
+        std::memcpy(&old, oldp, sizeof(old));
+        return (old ^ newval) != 0;
+    }
+    VL_ATTR_ALWINLINE bool causalityChangedQData(uint32_t* oldp, QData newval, int) {
+        return causalityChangedQData(oldp, newval);
     }
     VL_ATTR_ALWINLINE void chgWData(uint32_t* oldp, const WData* newvalp, int bits) {
         for (int i = 0; i < (bits + 31) / 32; ++i) {
@@ -421,14 +471,31 @@ public:
             }
         }
     }
+    VL_ATTR_ALWINLINE bool causalityChangedWData(uint32_t* oldp, const WData* newvalp, int bits) {
+        for (int i = 0; i < (bits + 31) / 32; ++i) {
+            if (oldp[i] ^ newvalp[i]) return true;
+        }
+        return false;
+    }
     VL_ATTR_ALWINLINE void chgEvent(uint32_t* oldp, const VlEventBase* newvalp) {
         if (newvalp->isTriggered()) fullEvent(oldp, newvalp);
+    }
+    VL_ATTR_ALWINLINE bool causalityChangedEvent(uint32_t*, const VlEventBase* newvalp) {
+        return newvalp->isTriggered();
     }
     VL_ATTR_ALWINLINE void chgEventTriggered(uint32_t* oldp) { fullEventTriggered(oldp); }
     VL_ATTR_ALWINLINE void chgDouble(uint32_t* oldp, double newval) {
         double old;  // LCOV_EXCL_LINE  // lcov bug
         std::memcpy(&old, oldp, sizeof(old));
         if (VL_UNLIKELY(old != newval)) fullDouble(oldp, newval);
+    }
+    VL_ATTR_ALWINLINE bool causalityChangedDouble(uint32_t* oldp, double newval) {
+        double old;
+        std::memcpy(&old, oldp, sizeof(old));
+        return old != newval;
+    }
+    VL_ATTR_ALWINLINE bool causalityChangedDouble(uint32_t* oldp, double newval, int) {
+        return causalityChangedDouble(oldp, newval);
     }
 };
 

@@ -1000,6 +1000,9 @@ void V3Options::notify() VL_MT_DISABLED {
     const int ntraces = traceEnabledFst() + traceEnabledSaif() + traceEnabledVcd();
     if (ntraces > 1)  // Issue #5813
         cmdfl->v3error("Only one of --trace-fst, --trace-saif or --trace--vcd may be used");
+    if (traceCausality() && !trace()) {
+        cmdfl->v3error("--trace-causality requires --trace, --trace-fst, --trace-saif, or --trace-vcd");
+    }
 
     if (protectIds()) {
         if (allPublic()) {
@@ -1810,6 +1813,9 @@ void V3Options::parseOptsList(FileLine* fl, const string& optdir, int argc,
     DECL_OPTION("-trace", OnOff, &m_trace);
     DECL_OPTION("-trace-saif", CbCall, [this]() { m_traceEnabledSaif = true; });
     DECL_OPTION("-trace-coverage", OnOff, &m_traceCoverage);
+    DECL_OPTION("-trace-causality", OnOff, &m_traceCausality);
+    DECL_OPTION("-trace-causality-output", Set, &m_traceCausalityOutput);
+    DECL_OPTION("-trace-causality-sinks", Set, &m_traceCausalitySinks);
     DECL_OPTION("-trace-depth", Set, &m_traceDepth);
     DECL_OPTION("-trace-fst", CbCall, [this]() {
         m_traceEnabledFst = true;

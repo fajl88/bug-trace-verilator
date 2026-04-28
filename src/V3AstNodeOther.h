@@ -1275,6 +1275,7 @@ class AstNetlist final : public AstNode {
     VTimescale m_timeprecision;  // Global time precision
     bool m_timescaleSpecified = false;  // Input HDL specified timescale
     uint32_t m_nTraceCodes = 0;  // Number of trace codes used by design
+    uint32_t m_nTraceActivityCodes = 0;  // Number of trace activity slots used by design
 public:
     AstNetlist();
     ASTGEN_MEMBERS_AstNetlist;
@@ -1318,6 +1319,8 @@ public:
     bool timescaleSpecified() const { return m_timescaleSpecified; }
     uint32_t nTraceCodes() const { return m_nTraceCodes; }
     void nTraceCodes(uint32_t value) { m_nTraceCodes = value; }
+    uint32_t nTraceActivityCodes() const { return m_nTraceActivityCodes; }
+    void nTraceActivityCodes(uint32_t value) { m_nTraceActivityCodes = value; }
     AstVarScope* stlFirstIterationp();
     void clearStlFirstIterationp() { m_stlFirstIterationp = nullptr; }
 };
@@ -2359,6 +2362,7 @@ class AstVarScope final : public AstNode {
     // @astgen ptr := m_varp : Optional[AstVar]  // [AfterLink] Pointer to variable itself
     bool m_trace : 1;  // Tracing is turned on for this scope
     bool m_optimizeLifePost : 1;  // One half of an NBA pair using ShadowVariable scheme. Optimize.
+    std::vector<AstVarScope*> m_causalityPredVscps;  // Static direct fan-in for causality tracing
 public:
     AstVarScope(FileLine* fl, AstScope* scopep, AstVar* varp)
         : ASTGEN_SUPER_VarScope(fl)
@@ -2390,6 +2394,15 @@ public:
     void trace(bool flag) { m_trace = flag; }
     bool optimizeLifePost() const { return m_optimizeLifePost; }
     void optimizeLifePost(bool flag) { m_optimizeLifePost = flag; }
+    const std::vector<AstVarScope*>& causalityPredVscps() const { return m_causalityPredVscps; }
+    void causalityPredVscpsClear() { m_causalityPredVscps.clear(); }
+    void causalityPredVscpAdd(AstVarScope* predp) {
+        if (!predp) return;
+        for (AstVarScope* const existingp : m_causalityPredVscps) {
+            if (existingp == predp) return;
+        }
+        m_causalityPredVscps.push_back(predp);
+    }
 };
 
 // === AstNodeCoverDecl ===
