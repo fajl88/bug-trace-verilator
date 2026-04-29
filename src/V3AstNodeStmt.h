@@ -1281,8 +1281,16 @@ class AstTraceDecl final : public AstNodeStmt {
     const VDirection m_declDirection;  // Declared direction input/output etc
     const bool m_inDtypeFunc;  // Trace decl inside type init function
     int m_codeInc{0};  // Code increment for type
-    std::vector<AstVarScope*> m_causalityPredVscps;  // Static predecessors before trace code assign
-    std::vector<uint32_t> m_causalityPredCodes;  // Final predecessor trace codes
+    struct CausalityPredVscpEdge final {
+        AstVarScope* predp = nullptr;
+        uint8_t role = 0;
+    };
+    struct CausalityPredCodeEdge final {
+        uint32_t predCode = 0;
+        uint8_t role = 0;
+    };
+    std::vector<CausalityPredVscpEdge> m_causalityPredVscpEdges;  // Pre-resolution role edges
+    std::vector<CausalityPredCodeEdge> m_causalityPredCodeEdges;  // Final role-tagged code edges
 public:
     AstTraceDecl(FileLine* fl, const string& showname,
                  AstVar* varp,  // For input/output state etc
@@ -1332,22 +1340,26 @@ public:
     bool inDtypeFunc() const { return m_inDtypeFunc; }
     AstVarScope* causalitySourceVscp() const { return m_causalitySourceVscp; }
     void causalitySourceVscp(AstVarScope* const vscp) { m_causalitySourceVscp = vscp; }
-    const std::vector<AstVarScope*>& causalityPredVscps() const { return m_causalityPredVscps; }
-    void causalityPredVscpsClear() { m_causalityPredVscps.clear(); }
-    void causalityPredVscpAdd(AstVarScope* predp) {
-        if (!predp) return;
-        for (AstVarScope* const existingp : m_causalityPredVscps) {
-            if (existingp == predp) return;
-        }
-        m_causalityPredVscps.push_back(predp);
+    const std::vector<CausalityPredVscpEdge>& causalityPredVscpEdges() const {
+        return m_causalityPredVscpEdges;
     }
-    const std::vector<uint32_t>& causalityPredCodes() const { return m_causalityPredCodes; }
-    void causalityPredCodesClear() { m_causalityPredCodes.clear(); }
-    void causalityPredCodeAdd(uint32_t code) {
-        for (const uint32_t existing : m_causalityPredCodes) {
-            if (existing == code) return;
+    void causalityPredVscpEdgesClear() { m_causalityPredVscpEdges.clear(); }
+    void causalityPredVscpEdgeAdd(AstVarScope* predp, uint8_t role) {
+        if (!predp) return;
+        for (const CausalityPredVscpEdge& existing : m_causalityPredVscpEdges) {
+            if (existing.predp == predp && existing.role == role) return;
         }
-        m_causalityPredCodes.push_back(code);
+        m_causalityPredVscpEdges.push_back(CausalityPredVscpEdge{predp, role});
+    }
+    const std::vector<CausalityPredCodeEdge>& causalityPredCodeEdges() const {
+        return m_causalityPredCodeEdges;
+    }
+    void causalityPredCodeEdgesClear() { m_causalityPredCodeEdges.clear(); }
+    void causalityPredCodeEdgeAdd(uint32_t predCode, uint8_t role) {
+        for (const CausalityPredCodeEdge& existing : m_causalityPredCodeEdges) {
+            if (existing.predCode == predCode && existing.role == role) return;
+        }
+        m_causalityPredCodeEdges.push_back(CausalityPredCodeEdge{predCode, role});
     }
 };
 class AstTraceInc final : public AstNodeStmt {

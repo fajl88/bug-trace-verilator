@@ -345,7 +345,8 @@ public:
                             const std::string& sinkFilter) VL_MT_SAFE;
     bool causalityEnabled() const VL_MT_SAFE { return m_causalityEnabled; }
     void causalityEmit(uint64_t timeui, uint32_t sinkCode, const uint32_t* predCodes,
-                      const bool* predChanged, uint32_t predCount) VL_MT_SAFE_EXCLUDES(m_mutex);
+                      const uint8_t* predRoles, uint32_t predCount, bool valueChanged)
+        VL_MT_SAFE_EXCLUDES(m_mutex);
 };
 
 //=============================================================================
@@ -393,8 +394,8 @@ public:
     VL_ATTR_ALWINLINE uint32_t* oldp(uint32_t code) { return m_sigs_oldvalp + code; }
     bool causalityEnabled() const { return this->m_owner.causalityEnabled(); }
     void causalityEmit(uint64_t timeui, uint32_t sinkCode, const uint32_t* predCodes,
-                      const bool* predChanged, uint32_t predCount) {
-        this->m_owner.causalityEmit(timeui, sinkCode, predCodes, predChanged, predCount);
+                      const uint8_t* predRoles, uint32_t predCount, bool valueChanged) {
+        this->m_owner.causalityEmit(timeui, sinkCode, predCodes, predRoles, predCount, valueChanged);
     }
 
     // Write to previous value buffer value and emit trace entry.

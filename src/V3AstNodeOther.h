@@ -2362,7 +2362,11 @@ class AstVarScope final : public AstNode {
     // @astgen ptr := m_varp : Optional[AstVar]  // [AfterLink] Pointer to variable itself
     bool m_trace : 1;  // Tracing is turned on for this scope
     bool m_optimizeLifePost : 1;  // One half of an NBA pair using ShadowVariable scheme. Optimize.
-    std::vector<AstVarScope*> m_causalityPredVscps;  // Static direct fan-in for causality tracing
+    struct CausalityPredEdge final {
+        AstVarScope* predp = nullptr;
+        uint8_t role = 0;
+    };
+    std::vector<CausalityPredEdge> m_causalityPredEdges;  // Role-tagged static direct fan-in
 public:
     AstVarScope(FileLine* fl, AstScope* scopep, AstVar* varp)
         : ASTGEN_SUPER_VarScope(fl)
@@ -2394,14 +2398,14 @@ public:
     void trace(bool flag) { m_trace = flag; }
     bool optimizeLifePost() const { return m_optimizeLifePost; }
     void optimizeLifePost(bool flag) { m_optimizeLifePost = flag; }
-    const std::vector<AstVarScope*>& causalityPredVscps() const { return m_causalityPredVscps; }
-    void causalityPredVscpsClear() { m_causalityPredVscps.clear(); }
-    void causalityPredVscpAdd(AstVarScope* predp) {
+    const std::vector<CausalityPredEdge>& causalityPredEdges() const { return m_causalityPredEdges; }
+    void causalityPredEdgesClear() { m_causalityPredEdges.clear(); }
+    void causalityPredEdgeAdd(AstVarScope* predp, uint8_t role) {
         if (!predp) return;
-        for (AstVarScope* const existingp : m_causalityPredVscps) {
-            if (existingp == predp) return;
+        for (const CausalityPredEdge& existing : m_causalityPredEdges) {
+            if (existing.predp == predp && existing.role == role) return;
         }
-        m_causalityPredVscps.push_back(predp);
+        m_causalityPredEdges.push_back(CausalityPredEdge{predp, role});
     }
 };
 

@@ -448,23 +448,23 @@ void VerilatedTrace<VL_SUB_T, VL_BUF_T>::configureCausality(const std::string& o
 template <>
 void VerilatedTrace<VL_SUB_T, VL_BUF_T>::causalityEmit(uint64_t timeui, uint32_t sinkCode,
                                                        const uint32_t* predCodes,
-                                                       const bool* predChanged,
-                                                       uint32_t predCount)
+                                                       const uint8_t* predRoles,
+                                                       uint32_t predCount, bool valueChanged)
     VL_MT_SAFE_EXCLUDES(m_mutex) {
     if (!m_causalityEnabled) return;
     const std::lock_guard<std::mutex> lock{m_causalityMutex};
     if (!m_causalityStream.is_open()) return;
     m_causalityStream << "{\"time\":" << timeui << ",\"sink_id\":" << sinkCode
-                      << ",\"active_predecessors\":[";
+                      << ",\"value_changed\":" << (valueChanged ? "true" : "false")
+                      << ",\"predecessors\":[";
     bool first = true;
     for (uint32_t idx = 0; idx < predCount; ++idx) {
-        if (!predChanged[idx]) continue;
         if (!first) m_causalityStream << ",";
         first = false;
-        m_causalityStream << predCodes[idx];
+        m_causalityStream << "{\"pred\":" << predCodes[idx]
+                          << ",\"role\":" << static_cast<uint32_t>(predRoles[idx]) << "}";
     }
-    m_causalityStream << "],\"predicates_checked\":" << predCount
-                      << ",\"value_class\":\"known\"}\n";
+    m_causalityStream << "],\"value_class\":\"known\"}\n";
 }
 
 template <>

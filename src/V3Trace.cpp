@@ -1110,7 +1110,17 @@ class TraceVisitor final : public VNVisitor {
 
         std::unordered_map<AstVarScope*, std::vector<AstTraceDecl*>> declsByVscp;
         std::map<uint32_t, AstTraceDecl*> declByCode;
-        std::set<std::pair<uint32_t, uint32_t>> edges;
+        struct EdgeRole final {
+            uint32_t src;
+            uint32_t dst;
+            uint8_t role;
+            bool operator<(const EdgeRole& other) const {
+                if (src != other.src) return src < other.src;
+                if (dst != other.dst) return dst < other.dst;
+                return role < other.role;
+            }
+        };
+        std::set<EdgeRole> edges;
 
         nodep->foreach([&](AstTraceDecl* declp) {
             if (!declp->codeAssigned() || declp->inDtypeFunc() || declp->arrayRange().ranged()) return;
@@ -1122,18 +1132,20 @@ class TraceVisitor final : public VNVisitor {
 
         nodep->foreach([&](AstTraceDecl* declp) {
             if (!declp->codeAssigned() || declp->inDtypeFunc() || declp->arrayRange().ranged()) return;
-            std::set<uint32_t> predCodes;
-            for (AstVarScope* const predp : declp->causalityPredVscps()) {
-                const auto it = declsByVscp.find(predp);
+            std::set<std::pair<uint32_t, uint8_t>> predCodeRoles;
+            for (const auto& predEdge : declp->causalityPredVscpEdges()) {
+                const auto it = declsByVscp.find(predEdge.predp);
                 if (it == declsByVscp.end()) continue;
-                for (AstTraceDecl* const predDeclp : it->second) predCodes.insert(predDeclp->code());
+                for (AstTraceDecl* const predDeclp : it->second) {
+                    predCodeRoles.emplace(predDeclp->code(), predEdge.role);
+                }
             }
-            declp->causalityPredCodesClear();
-            for (const uint32_t predCode : predCodes) {
-                declp->causalityPredCodeAdd(predCode);
-                edges.emplace(predCode, declp->code());
+            declp->causalityPredCodeEdgesClear();
+            for (const auto& predCodeRole : predCodeRoles) {
+                declp->causalityPredCodeEdgeAdd(predCodeRole.first, predCodeRole.second);
+                edges.emplace(EdgeRole{predCodeRole.first, declp->code(), predCodeRole.second});
             }
-            declp->causalityPredVscpsClear();
+            declp->causalityPredVscpEdgesClear();
             declp->causalitySourceVscp(nullptr);
         });
 
@@ -1157,11 +1169,12 @@ class TraceVisitor final : public VNVisitor {
         for (const auto& edge : edges) {
             if (!first) os << ",";
             first = false;
-            os << "{\"src\":" << edge.first << ",\"dst\":" << edge.second << "}";
+            os << "{\"src\":" << edge.src << ",\"dst\":" << edge.dst << ",\"role\":"
+               << static_cast<uint32_t>(edge.role) << "}";
         }
         os << "]}\n";
 
-        nodep->foreach([](AstVarScope* vscp) { vscp->causalityPredVscpsClear(); });
+        nodep->foreach([](AstVarScope* vscp) { vscp->causalityPredEdgesClear(); });
     }
 
     TraceCFuncVertex* getCFuncVertexp(AstCFunc* nodep) {

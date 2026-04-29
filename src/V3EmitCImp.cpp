@@ -597,7 +597,6 @@ class EmitCTrace final : public EmitCFunc {
     V3UniqueNames m_uniqueNames;  // Generates unique file names
     const std::string m_fileBaseName = EmitCUtil::topClassName() + "_" + protect("_Trace");
     std::map<uint32_t, const AstTraceDecl*> m_traceDeclByCode;
-    std::map<uint32_t, const AstTraceInc*> m_traceIncByCode;
 
     // METHODS
     void openNextOutputFile() {
@@ -617,9 +616,16 @@ class EmitCTrace final : public EmitCFunc {
         const auto it = m_traceDeclByCode.find(code);
         return it == m_traceDeclByCode.end() ? nullptr : it->second;
     }
-    const AstTraceInc* findTraceIncByCode(uint32_t code) const {
-        const auto it = m_traceIncByCode.find(code);
-        return it == m_traceIncByCode.end() ? nullptr : it->second;
+    void registerTraceDeclByCode(const AstTraceDecl* nodep) {
+        if (!v3Global.opt.traceCausality()) return;
+        if (!nodep->codeAssigned() || nodep->inDtypeFunc() || nodep->arrayRange().ranged()) return;
+        const auto it = m_traceDeclByCode.find(nodep->code());
+        if (it == m_traceDeclByCode.end()) {
+            m_traceDeclByCode.emplace(nodep->code(), nodep);
+        } else if (it->second->causalityPredCodeEdges().empty()
+                   && !nodep->causalityPredCodeEdges().empty()) {
+            it->second = nodep;
+        }
     }
 
     std::string traceScalarType(const AstTraceDecl* declp, bool& emitWidth) const {
@@ -654,22 +660,6 @@ class EmitCTrace final : public EmitCFunc {
             iterateConst(declp->valuep());
             puts(")");
         }
-    }
-
-    void emitPredChangedExpr(uint32_t predCode, uint32_t sinkBaseCode) {
-        const AstTraceInc* const predIncp = findTraceIncByCode(predCode);
-        if (!predIncp || predIncp->declp()->arrayRange().ranged()) {
-            puts("false");
-            return;
-        }
-        bool emitWidth = true;
-        const AstTraceDecl* const predDeclp = predIncp->declp();
-        const std::string stype = traceScalarType(predDeclp, emitWidth);
-        puts("bufp->causalityChanged" + stype + "(oldp+"
-             + cvtToStr(predCode - sinkBaseCode) + ", ");
-        emitTraceValue(predIncp, -1);
-        if (emitWidth) puts("," + cvtToStr(predDeclp->widthMin()));
-        puts(")");
     }
 
     bool emitTraceIsScBv(const AstTraceInc* nodep) {
@@ -816,8 +806,11 @@ class EmitCTrace final : public EmitCFunc {
         }
         const uint32_t offset = (arrayindex < 0) ? 0 : (arrayindex * nodep->declp()->widthWords());
         const uint32_t code = nodep->declp()->code() + offset;
+        const AstTraceDecl* const metaDeclp = findTraceDeclByCode(code);
+        const auto& predEdges = metaDeclp ? metaDeclp->causalityPredCodeEdges()
+                                          : nodep->declp()->causalityPredCodeEdges();
+        const std::string changedVar = "__Vtrace_changed_" + cvtToStr(code);
         if (v3Global.opt.traceCausality() && nodep->traceType() != VTraceType::CONSTANT) {
-            const std::string changedVar = "__Vtrace_changed_" + cvtToStr(code);
             puts("const bool " + changedVar + " = bufp->causalityChanged" + stype + "(oldp+");
             puts(cvtToStr(code - nodep->baseCode()));
             puts(",");
@@ -838,32 +831,34 @@ class EmitCTrace final : public EmitCFunc {
         if (emitWidth) puts("," + cvtToStr(nodep->declp()->widthMin()));
         puts(");\n");
         if (v3Global.opt.traceCausality() && nodep->traceType() != VTraceType::CONSTANT) {
-            const auto& predCodes = nodep->declp()->causalityPredCodes();
-            puts("if (VL_UNLIKELY(__Vtrace_changed_" + cvtToStr(code) + ")) {\n");
-            if (!predCodes.empty()) {
-                puts("static const uint32_t __Vpred_codes[] = {");
-                for (size_t idx = 0; idx < predCodes.size(); ++idx) {
+            const std::string predCodesVar = "__Vpred_codes_" + cvtToStr(code);
+            const std::string predRolesVar = "__Vpred_roles_" + cvtToStr(code);
+            if (!predEdges.empty()) {
+                puts("static const uint32_t " + predCodesVar + "[] = {");
+                for (size_t idx = 0; idx < predEdges.size(); ++idx) {
                     if (idx) puts(",");
-                    puts(cvtToStr(predCodes[idx]));
+                    puts(cvtToStr(predEdges[idx].predCode));
                 }
                 puts("};\n");
-                puts("bool __Vpred_changed[" + cvtToStr(predCodes.size()) + "] = {");
-                for (size_t idx = 0; idx < predCodes.size(); ++idx) {
+                puts("static const uint8_t " + predRolesVar + "[] = {");
+                for (size_t idx = 0; idx < predEdges.size(); ++idx) {
                     if (idx) puts(",");
-                    emitPredChangedExpr(predCodes[idx], nodep->baseCode());
+                    puts(cvtToStr(static_cast<uint32_t>(predEdges[idx].role)));
                 }
                 puts("};\n");
                 puts("bufp->causalityEmit(vlSymsp->_vm_contextp__->time(), ");
                 puts(cvtToStr(code));
-                puts(", __Vpred_codes, __Vpred_changed, ");
-                puts(cvtToStr(predCodes.size()));
+                puts(", " + predCodesVar + ", " + predRolesVar + ", ");
+                puts(cvtToStr(predEdges.size()));
+                puts(", " + changedVar);
                 puts(");\n");
             } else {
                 puts("bufp->causalityEmit(vlSymsp->_vm_contextp__->time(), ");
                 puts(cvtToStr(code));
-                puts(", nullptr, nullptr, 0);\n");
+                puts(", nullptr, nullptr, 0, ");
+                puts(changedVar);
+                puts(");\n");
             }
-            puts("}\n");
         }
     }
 
@@ -943,10 +938,7 @@ class EmitCTrace final : public EmitCFunc {
         putns(nodep, "VL_TRACE_POP_PREFIX(tracep);\n");
     }
     void visit(AstTraceDecl* nodep) override {
-        if (v3Global.opt.traceCausality() && nodep->codeAssigned() && !nodep->inDtypeFunc()
-            && !nodep->arrayRange().ranged()) {
-            m_traceDeclByCode.emplace(nodep->code(), nodep);
-        }
+        registerTraceDeclByCode(nodep);
         const int enumNum = emitTraceDeclDType(nodep->dtypep());
         putns(nodep, "");
         if (nodep->arrayRange().ranged()) {
@@ -973,13 +965,7 @@ class EmitCTrace final : public EmitCFunc {
         : m_slow{slow} {
         m_modp = v3Global.rootp()->topModulep();
         if (v3Global.opt.traceCausality()) {
-            v3Global.rootp()->foreach([this](AstTraceInc* incp) {
-                if (incp->declp()->arrayRange().ranged()) return;
-                if (incp->traceType() == VTraceType::CONSTANT) return;
-                if (incp->declp()->inDtypeFunc()) return;
-                if (incp->declp()->dtypeCallp()) return;
-                m_traceIncByCode.emplace(incp->declp()->code(), incp);
-            });
+            v3Global.rootp()->foreach([this](AstTraceDecl* declp) { registerTraceDeclByCode(declp); });
         }
         // Open output file
         openNextOutputFile();

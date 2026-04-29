@@ -328,8 +328,8 @@ class TraceDeclVisitor final : public VNVisitor {
             = new AstTraceDecl{flp,      m_traName,  m_traVscp->varp(), valuep,
                                bitRange, arrayRange, dtypeCallp,        validOffset};
         newp->causalitySourceVscp(m_traVscp);
-        for (AstVarScope* const predp : m_traVscp->causalityPredVscps()) {
-            newp->causalityPredVscpAdd(predp);
+        for (const auto& predEdge : m_traVscp->causalityPredEdges()) {
+            newp->causalityPredVscpEdgeAdd(predEdge.predp, predEdge.role);
         }
         if (validOffset) {
             newp->code(m_offset);
