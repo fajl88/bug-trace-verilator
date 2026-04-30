@@ -1003,7 +1003,6 @@ void V3Options::notify() VL_MT_DISABLED {
     if (traceCausality() && !trace()) {
         cmdfl->v3error("--trace-causality requires --trace, --trace-fst, --trace-saif, or --trace-vcd");
     }
-
     if (protectIds()) {
         if (allPublic()) {
             // We always call protect() on names, we don't check if public or not
@@ -1816,6 +1815,8 @@ void V3Options::parseOptsList(FileLine* fl, const string& optdir, int argc,
     DECL_OPTION("-trace-causality", OnOff, &m_traceCausality);
     DECL_OPTION("-trace-causality-output", Set, &m_traceCausalityOutput);
     DECL_OPTION("-trace-causality-sinks", Set, &m_traceCausalitySinks);
+    DECL_OPTION("-fault-inject-config", Set, &m_faultInjectConfig);
+    DECL_OPTION("-fault-inject-strict-xz", OnOff, &m_faultInjectStrictXz);
     DECL_OPTION("-trace-depth", Set, &m_traceDepth);
     DECL_OPTION("-trace-fst", CbCall, [this]() {
         m_traceEnabledFst = true;

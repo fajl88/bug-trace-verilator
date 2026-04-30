@@ -25,7 +25,10 @@
 #include "V3MemberMap.h"
 
 #include <algorithm>
+#include <fstream>
 #include <map>
+#include <regex>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -116,11 +119,172 @@ public:
 //  Emit statements and expressions
 
 class EmitCFunc VL_NOT_FINAL : public EmitCConstInit {
+    struct FaultConfig final {
+        bool enabled = false;
+        bool strictXz = true;
+        uint32_t siteCode = 0;
+        uint32_t assignmentUid = 0;
+        std::string siteKind;
+        std::string model;
+        uint64_t value = 0;
+        uint64_t xorMask = 0;
+        uint32_t bitIndex = 0;
+    };
+    struct FaultManifestRow final {
+        uint32_t assignmentUid = 0;
+        uint32_t siteCode = 0;
+        std::string siteKind;
+        std::string lhsCanonical;
+        std::string sourceLoc;
+        std::string emitFunc;
+    };
+
     VMemberMap m_memberMap;
     AstVarRef* m_wideTempRefp = nullptr;  // Variable that _WW macros should be setting
     std::unordered_map<AstJumpBlock*, size_t> m_labelNumbers;  // Label numbers for AstJumpBlocks
+    std::unordered_map<const AstVar*, uint32_t> m_traceCodeByVar;
+    std::unordered_map<const AstVarScope*, uint32_t> m_traceCodeByVarScope;
+    std::unordered_map<std::string, uint32_t> m_traceCodeByShowname;
+    bool m_traceCodeMapInit = false;
+    bool m_faultConfigInit = false;
+    FaultConfig m_faultCfg;
+    uint32_t m_nextAssignmentUid = 1;
+    uint32_t m_rewriteCount = 0;
+    std::vector<FaultManifestRow> m_faultManifestRows;
+    std::string m_faultManifestPath;
+    std::string m_faultProofPath;
+    std::string m_faultProofPreSig;
+    std::string m_faultProofPostSig;
+    uint32_t m_faultSelectedSiteCode = 0;
+    uint32_t m_faultSelectedAssignmentUid = 0;
+    std::string m_faultSelectedLhs;
+    std::string m_faultSelectedFunc;
     bool m_createdScopeHash = false;  // Already created a scope hash
 
+    static bool matchStringField(const std::string& text, const std::string& key, std::string& out) {
+        const std::regex re{"\"" + key + "\"\\s*:\\s*\"([^\"]*)\""};
+        std::smatch m;
+        if (!std::regex_search(text, m, re) || m.size() < 2) return false;
+        out = m[1].str();
+        return true;
+    }
+    static bool matchUIntField(const std::string& text, const std::string& key, uint64_t& out) {
+        const std::regex re{"\"" + key + "\"\\s*:\\s*([0-9]+)"};
+        std::smatch m;
+        if (!std::regex_search(text, m, re) || m.size() < 2) return false;
+        out = static_cast<uint64_t>(std::strtoull(m[1].str().c_str(), nullptr, 10));
+        return true;
+    }
+    static std::string readWholeFile(const std::string& path) {
+        std::ifstream ifs{path.c_str()};
+        if (!ifs.good()) return "";
+        std::ostringstream os;
+        os << ifs.rdbuf();
+        return os.str();
+    }
+    static uint64_t widthMask(const int bits) {
+        if (bits <= 0) return 0ULL;
+        if (bits >= 64) return ~0ULL;
+        return (1ULL << bits) - 1ULL;
+    }
+    static const AstVarRef* lhsVarRef(const AstNode* nodep) {
+        if (!nodep) return nullptr;
+        if (const AstVarRef* const vrp = VN_CAST(nodep, VarRef)) return vrp;
+        if (const AstSel* const selp = VN_CAST(nodep, Sel)) return lhsVarRef(selp->fromp());
+        if (const AstArraySel* const selp = VN_CAST(nodep, ArraySel)) return lhsVarRef(selp->fromp());
+        if (const AstMemberSel* const selp = VN_CAST(nodep, MemberSel)) return lhsVarRef(selp->fromp());
+        if (const AstStructSel* const selp = VN_CAST(nodep, StructSel)) return lhsVarRef(selp->fromp());
+        return nullptr;
+    }
+    static std::string sourceLoc(const AstNode* nodep) {
+        if (!nodep || !nodep->fileline()) return "unknown:0";
+        return nodep->fileline()->filename() + ":" + cvtToStr(nodep->fileline()->lineno());
+    }
+    static std::string dataTypeNameForWidth(const int bits) {
+        if (bits <= 8) return "CData";
+        if (bits <= 16) return "SData";
+        if (bits <= 32) return "IData";
+        if (bits <= 64) return "QData";
+        return "";
+    }
+    void initTraceCodeMap() {
+        if (m_traceCodeMapInit) return;
+        m_traceCodeMapInit = true;
+        v3Global.rootp()->foreach([this](AstTraceDecl* declp) {
+            if (!declp->codeAssigned() || declp->inDtypeFunc() || declp->arrayRange().ranged()) return;
+            if (const AstVarRef* const varrefp = VN_CAST(declp->valuep(), VarRef)) {
+                if (varrefp->varp()) m_traceCodeByVar.emplace(varrefp->varp(), declp->code());
+                if (varrefp->varScopep()) m_traceCodeByVarScope.emplace(varrefp->varScopep(), declp->code());
+            }
+            const std::string showname = declp->showname();
+            const auto it = m_traceCodeByShowname.find(showname);
+            if (it == m_traceCodeByShowname.end()) {
+                m_traceCodeByShowname.emplace(showname, declp->code());
+            } else if (it->second != declp->code()) {
+                it->second = 0;  // Ambiguous showname key.
+            }
+        });
+    }
+    uint32_t traceCodeForVar(const AstVar* varp, const AstVarScope* vscp) {
+        initTraceCodeMap();
+        if (vscp) {
+            const auto it = m_traceCodeByVarScope.find(vscp);
+            if (it != m_traceCodeByVarScope.end()) return it->second;
+        }
+        if (varp) {
+            const auto it = m_traceCodeByVar.find(varp);
+            if (it != m_traceCodeByVar.end()) return it->second;
+            const std::string varName = varp->name();
+            for (const auto& pair : m_traceCodeByShowname) {
+                if (pair.second == 0) continue;
+                if (varName == pair.first) return pair.second;
+                const std::string suffix = "__DOT__" + pair.first;
+                if (varName.size() > suffix.size()
+                    && varName.compare(varName.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                    return pair.second;
+                }
+            }
+        }
+        return 0;
+    }
+    void initFaultConfig() {
+        if (m_faultConfigInit) return;
+        m_faultConfigInit = true;
+        const std::string cfgPath = v3Global.opt.faultInjectConfig();
+        m_faultCfg.strictXz = v3Global.opt.faultInjectStrictXz();
+        if (cfgPath.empty()) return;
+        m_faultManifestPath = v3Global.opt.makeDir() + "/" + v3Global.opt.prefix()
+                              + "__fault_assignment_manifest.jsonl";
+        m_faultProofPath
+            = v3Global.opt.makeDir() + "/" + v3Global.opt.prefix() + "__fault_rewrite_proof.json";
+        static bool s_manifestResetDone = false;
+        if (!s_manifestResetDone) {
+            std::ofstream manifestReset{m_faultManifestPath.c_str(), std::ios::out | std::ios::trunc};
+            (void)manifestReset;
+            s_manifestResetDone = true;
+        }
+        const std::string cfg = readWholeFile(cfgPath);
+        if (cfg.empty()) v3fatal("fault inject config not readable: " << cfgPath);
+        m_faultCfg.enabled = true;
+        uint64_t tmp = 0;
+        if (!matchUIntField(cfg, "site_code", tmp)) v3fatal("fault config missing site_code");
+        m_faultCfg.siteCode = static_cast<uint32_t>(tmp);
+        if (!matchStringField(cfg, "site_kind", m_faultCfg.siteKind)) v3fatal("fault config missing site_kind");
+        if (m_faultCfg.siteKind != "seq_d") v3fatal("attempt #2 supports only site_kind=seq_d");
+        if (!matchUIntField(cfg, "assignment_uid", tmp)) v3fatal("fault config missing assignment_uid");
+        m_faultCfg.assignmentUid = static_cast<uint32_t>(tmp);
+        if (!matchStringField(cfg, "model", m_faultCfg.model)) v3fatal("fault config missing model");
+        if (matchUIntField(cfg, "value", tmp)) m_faultCfg.value = tmp;
+        if (matchUIntField(cfg, "xor_mask", tmp)) m_faultCfg.xorMask = tmp;
+        if (matchUIntField(cfg, "bit", tmp)) m_faultCfg.bitIndex = static_cast<uint32_t>(tmp);
+    }
+    void appendManifestRow(const FaultManifestRow& row) {
+        if (m_faultManifestPath.empty()) return;
+        std::ofstream mof{m_faultManifestPath.c_str(), std::ios::out | std::ios::app};
+        mof << "{\"assignment_uid\":" << row.assignmentUid << ",\"site_code\":" << row.siteCode
+            << ",\"site_kind\":\"" << row.siteKind << "\",\"lhs\":\"" << row.lhsCanonical
+            << "\",\"source\":\"" << row.sourceLoc << "\",\"emit_func\":\"" << row.emitFunc << "\"}\n";
+    }
 protected:
     VL_DEFINE_DEBUG_FUNCTIONS;
 
@@ -149,6 +313,37 @@ protected:
     }
 
 public:
+    ~EmitCFunc() override {
+        if (m_faultCfg.enabled && !m_faultManifestRows.empty() && !m_faultProofPath.empty()) {
+            std::ofstream pof{m_faultProofPath.c_str(), std::ios::out | std::ios::trunc};
+            pof << "{\n";
+            pof << "  \"site_code\": " << m_faultSelectedSiteCode << ",\n";
+            pof << "  \"assignment_uid\": " << m_faultSelectedAssignmentUid << ",\n";
+            pof << "  \"site_kind\": \"seq_d\",\n";
+            pof << "  \"lhs\": \"" << m_faultSelectedLhs << "\",\n";
+            pof << "  \"emit_func\": \"" << m_faultSelectedFunc << "\",\n";
+            pof << "  \"rewrite_count\": " << m_rewriteCount << ",\n";
+            pof << "  \"pre_signature\": \"" << m_faultProofPreSig << "\",\n";
+            pof << "  \"post_signature\": \"" << m_faultProofPostSig << "\"\n";
+            pof << "}\n";
+        }
+        if (m_faultCfg.enabled && !m_faultManifestRows.empty() && m_rewriteCount != 1) {
+            std::ostringstream os;
+            os << "fault rewrite invariant violated: expected exactly one rewrite for site_code="
+               << m_faultCfg.siteCode << " assignment_uid=" << m_faultCfg.assignmentUid
+               << " site_kind=seq_d, got rewrite_count=" << m_rewriteCount << ".";
+            if (!m_faultManifestRows.empty()) {
+                os << " Candidates for site_code " << m_faultCfg.siteCode << ":";
+                for (const FaultManifestRow& row : m_faultManifestRows) {
+                    if (row.siteCode != m_faultCfg.siteCode) continue;
+                    os << " [uid=" << row.assignmentUid << ", lhs=" << row.lhsCanonical
+                       << ", func=" << row.emitFunc << ", source=" << row.sourceLoc << "]";
+                }
+            }
+            v3fatal(os.str());
+        }
+    }
+
     // METHODS
     bool displayEmitHeader(AstNode* nodep);
     void displayNode(AstNode* nodep, AstSFormatF* fmtp, const string& vformat, AstNode* exprsp,
@@ -487,6 +682,7 @@ public:
     }
 
     void visit(AstNodeAssign* nodep) override {
+        initFaultConfig();
         if (AstCReset* const resetp = VN_CAST(nodep->rhsp(), CReset)) {
             // TODO get rid of emitVarReset and instead let AstNodeAssign understand how to init
             // anything
@@ -513,9 +709,34 @@ public:
             }
             return;
         }
+        const bool isSeqD = VN_IS(nodep, AssignDly);
+        uint32_t assignmentUid = 0;
+        uint32_t traceSiteCode = 0;
+        std::string lhsCanonical = "unknown";
+        if (isSeqD) {
+            if (const AstVarRef* const lhsVrp = lhsVarRef(nodep->lhsp())) {
+                lhsCanonical = lhsVrp->varp() ? lhsVrp->varp()->name() : "unknown";
+                traceSiteCode = traceCodeForVar(lhsVrp->varp(), lhsVrp->varScopep());
+            }
+            assignmentUid = traceSiteCode ? traceSiteCode : m_nextAssignmentUid++;
+            if (m_faultCfg.enabled) {
+                const FaultManifestRow row{assignmentUid, traceSiteCode, "seq_d", lhsCanonical,
+                                           sourceLoc(nodep),
+                                           m_cfuncp ? m_cfuncp->name() : "unknown"};
+                m_faultManifestRows.push_back(row);
+                appendManifestRow(row);
+            }
+        }
+        const bool faultTargetThisAssign
+            = m_faultCfg.enabled && isSeqD && traceSiteCode == m_faultCfg.siteCode
+              && assignmentUid == m_faultCfg.assignmentUid;
+        if (faultTargetThisAssign && m_faultCfg.strictXz && nodep->dtypep()->skipRefp()->isFourstate()) {
+            nodep->v3fatalSrc("strict-xz is enabled and selected seq_d assignment is four-state");
+        }
         bool paren = true;
         bool decind = false;
         bool rhs = true;
+        bool faultSupported = false;
         bool reverseUnpack = false;  // Set for descending CvtPackedToArray
         const AstUnpackArrayDType* const unpackDtp
             = VN_CAST(nodep->dtypep()->skipRefp(), UnpackArrayDType);
@@ -639,8 +860,54 @@ public:
                 // Emit "VlUnpacked<type, depth>{{...InitArray...}}"
                 puts(unpackDtp->cType("", false, false, false));
             }
+            faultSupported = true;
         }
-        if (rhs) iterateAndNextConstNull(nodep->rhsp());
+        if (faultTargetThisAssign && !faultSupported) {
+            nodep->v3fatalSrc("selected seq_d assignment shape is unsupported for attempt #2 rewrite");
+        }
+        if (rhs) {
+            if (faultTargetThisAssign) {
+                const int bits = nodep->widthMin();
+                const std::string dataType = dataTypeNameForWidth(bits);
+                if (dataType.empty()) nodep->v3fatalSrc("fault injection supports widths up to 64 bits");
+                const uint64_t mask = widthMask(bits);
+                if (m_faultCfg.model == "stuck_at" || m_faultCfg.model == "const_replace") {
+                    puts("(static_cast<" + dataType + ">(0x"
+                         + cvtToHex(m_faultCfg.value & mask) + "ULL))");
+                } else if (m_faultCfg.model == "xor_mask") {
+                    puts("(static_cast<" + dataType + ">((static_cast<uint64_t>(");
+                    iterateAndNextConstNull(nodep->rhsp());
+                    puts(") ^ 0x" + cvtToHex(m_faultCfg.xorMask & mask) + "ULL) & 0x"
+                         + cvtToHex(mask) + "ULL))");
+                } else if (m_faultCfg.model == "invert") {
+                    puts("(static_cast<" + dataType + ">((~static_cast<uint64_t>(");
+                    iterateAndNextConstNull(nodep->rhsp());
+                    puts(")) & 0x" + cvtToHex(mask) + "ULL))");
+                } else if (m_faultCfg.model == "bit_flip") {
+                    if (m_faultCfg.bitIndex >= static_cast<uint32_t>(bits)) {
+                        nodep->v3fatalSrc("fault config bit index out of range for assignment width");
+                    }
+                    puts("(static_cast<" + dataType + ">((static_cast<uint64_t>(");
+                    iterateAndNextConstNull(nodep->rhsp());
+                    puts(") ^ (1ULL << " + cvtToStr(m_faultCfg.bitIndex) + ")) & 0x"
+                         + cvtToHex(mask) + "ULL))");
+                } else {
+                    nodep->v3fatalSrc("unsupported fault model: " << m_faultCfg.model);
+                }
+                ++m_rewriteCount;
+                if (m_rewriteCount > 1) {
+                    nodep->v3fatalSrc("fault rewrite invariant violated: more than one assignment rewritten");
+                }
+                m_faultSelectedSiteCode = traceSiteCode;
+                m_faultSelectedAssignmentUid = assignmentUid;
+                m_faultSelectedLhs = lhsCanonical;
+                m_faultSelectedFunc = m_cfuncp ? m_cfuncp->name() : "unknown";
+                m_faultProofPreSig = nodep->rhsp()->prettyTypeName() + "|width=" + cvtToStr(nodep->widthMin());
+                m_faultProofPostSig = "model=" + m_faultCfg.model;
+            } else {
+                iterateAndNextConstNull(nodep->rhsp());
+            }
+        }
         if (paren) puts(")");
         if (decind) ofp()->blockDec();
         puts(";\n");
@@ -1810,7 +2077,6 @@ public:
 
 protected:
     EmitCFunc() = default;
-    ~EmitCFunc() override = default;
 };
 
 #endif  // guard
