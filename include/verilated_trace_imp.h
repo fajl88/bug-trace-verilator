@@ -425,12 +425,14 @@ void VerilatedTrace<VL_SUB_T, VL_BUF_T>::addCleanupCb(cleanupCb_t cb, void* user
 template <>
 void VerilatedTrace<VL_SUB_T, VL_BUF_T>::configureCausality(const std::string& outputPath,
                                                              const std::string& staticGraphPath,
-                                                             const std::string& sinkFilter)
+                                                             const std::string& sinkFilter,
+                                                             const std::string& precisionMode)
     VL_MT_SAFE {
     const VerilatedLockGuard lock{m_mutex};
     m_causalityOutputPath = outputPath;
     m_causalityStaticGraphPath = staticGraphPath;
     m_causalitySinksFilter = sinkFilter;
+    m_causalityPrecisionMode = precisionMode;
     m_causalityEnabled = !m_causalityOutputPath.empty();
     if (!m_causalityEnabled) return;
     if (m_causalityStream.is_open()) m_causalityStream.close();
@@ -439,32 +441,53 @@ void VerilatedTrace<VL_SUB_T, VL_BUF_T>::configureCausality(const std::string& o
         m_causalityEnabled = false;
         return;
     }
-    m_causalityStream << "{\"event\":\"trace_causality_header\",\"version\":1,"
+    m_causalityStream << "{\"event\":\"trace_causality_header\",\"version\":2,"
                      << "\"static_graph\":\"" << m_causalityStaticGraphPath
-                     << "\",\"sink_filter\":\"" << m_causalitySinksFilter << "\"}\n";
+                     << "\",\"sink_filter\":\"" << m_causalitySinksFilter
+                     << "\",\"event_header_version\":2"
+                     << ",\"precision_mode\":\"" << m_causalityPrecisionMode << "\"}\n";
     m_causalityStream.flush();
 }
 
+// 8-arg specialization must precede the 7-arg wrapper (its body calls this overload).
 template <>
 void VerilatedTrace<VL_SUB_T, VL_BUF_T>::causalityEmit(uint64_t timeui, uint32_t sinkCode,
+                                                       uint32_t writeSiteId,
                                                        const uint32_t* predCodes,
                                                        const uint8_t* predRoles,
+                                                       const int8_t* predTimeDeltas,
                                                        uint32_t predCount, bool valueChanged)
     VL_MT_SAFE_EXCLUDES(m_mutex) {
     if (!m_causalityEnabled) return;
     const std::lock_guard<std::mutex> lock{m_causalityMutex};
     if (!m_causalityStream.is_open()) return;
-    m_causalityStream << "{\"time\":" << timeui << ",\"sink_id\":" << sinkCode
-                      << ",\"value_changed\":" << (valueChanged ? "true" : "false")
+    const uint32_t schemaVer = writeSiteId ? 3U : 2U;
+    m_causalityStream << "{\"time\":" << timeui << ",\"sink_id\":" << sinkCode;
+    if (writeSiteId) m_causalityStream << ",\"write_site_id\":" << writeSiteId;
+    m_causalityStream << ",\"value_changed\":" << (valueChanged ? "true" : "false")
                       << ",\"predecessors\":[";
     bool first = true;
     for (uint32_t idx = 0; idx < predCount; ++idx) {
         if (!first) m_causalityStream << ",";
         first = false;
         m_causalityStream << "{\"pred\":" << predCodes[idx]
-                          << ",\"role\":" << static_cast<uint32_t>(predRoles[idx]) << "}";
+                          << ",\"role\":" << static_cast<uint32_t>(predRoles[idx])
+                          << ",\"time_delta\":" << static_cast<int32_t>(predTimeDeltas[idx])
+                          << "}";
     }
-    m_causalityStream << "],\"value_class\":\"known\"}\n";
+    m_causalityStream << "],\"value_class\":\"known\",\"event_schema_version\":" << schemaVer
+                      << "}\n";
+}
+
+template <>
+void VerilatedTrace<VL_SUB_T, VL_BUF_T>::causalityEmit(uint64_t timeui, uint32_t sinkCode,
+                                                       const uint32_t* predCodes,
+                                                       const uint8_t* predRoles,
+                                                       const int8_t* predTimeDeltas,
+                                                       uint32_t predCount, bool valueChanged)
+    VL_MT_SAFE_EXCLUDES(m_mutex) {
+    causalityEmit(timeui, sinkCode, 0U, predCodes, predRoles, predTimeDeltas, predCount,
+                  valueChanged);
 }
 
 template <>

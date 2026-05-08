@@ -627,6 +627,8 @@ static void process() {
         // Output the text
         if (!v3Global.opt.lintOnly() && !v3Global.opt.serializeOnly()
             && !v3Global.opt.dpiHdrOnly()) {
+            // Final assignment shapes: annotate write-site ids for strict trace causality.
+            if (v3Global.opt.traceCausality()) V3TraceCausality::writeSiteAnnotateAll(v3Global.rootp());
             // emitcInlines is first, as it may set needHInlines which other emitters read
             V3EmitC::emitcInlines();
             V3EmitC::emitcSyms();

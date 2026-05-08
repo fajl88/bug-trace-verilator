@@ -300,6 +300,11 @@ public:
         m_sptrace.dumpvars(level, hier);
     }
 
+    void causalityEmitFromEval(uint64_t timeui, uint32_t sinkCode, uint32_t writeSiteId,
+                               const uint32_t* predCodes, const uint8_t* predRoles,
+                               const int8_t* predTimeDeltas, uint32_t predCount,
+                               bool valueChanged) override VL_MT_SAFE;
+
     // Internal class access
     VerilatedFst* spTrace() { return &m_sptrace; }
 };

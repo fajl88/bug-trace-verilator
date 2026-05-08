@@ -421,6 +421,7 @@ protected:
         VlOs::DeltaCpuTime m_cpuTimeStart{false};  // CPU time, starts when create first model
         VlOs::DeltaWallTime m_wallTimeStart{false};  // Wall time, starts when create first model
         std::vector<traceBaseModelCb_t> m_traceBaseModelCbs;  // Callbacks to traceRegisterModel
+        VerilatedTraceBaseC* m_causalityTraceFilep = nullptr;  // For assignment-site causality emit
     } m_ns;
 
     mutable VerilatedMutex m_argMutex;  // Protect m_argVec, m_argVecLoaded
@@ -619,6 +620,11 @@ public:
 
     /// Trace signals in models within the context; called by application code
     void trace(VerilatedTraceBaseC* tfp, int levels, int options = 0);
+    /// Trace object registered for assignment-site causality emission (strict modes).
+    VerilatedTraceBaseC* causalityTraceFilep() const VL_MT_SAFE { return m_ns.m_causalityTraceFilep; }
+    void causalityTraceFilep(VerilatedTraceBaseC* filep) VL_MT_SAFE {
+        m_ns.m_causalityTraceFilep = filep;
+    }
     /// Allow traces to at some point be enabled (disables some optimizations)
     void traceEverOn(bool flag) VL_MT_SAFE {
         if (flag) calcUnusedSigs(true);
@@ -1067,6 +1073,10 @@ void VerilatedContext::timeprecision(int value) VL_MT_SAFE {
     if (VL_UNLIKELY(value != sc_prec)) Verilated::scTimePrecisionError(sc_prec, value);
 #endif
 }
+
+//=========================================================================
+// Complete trace base type for generated causality hooks (causalityTraceFilep()).
+#include "verilated_trace_base_c.h"
 
 #undef VERILATOR_VERILATED_H_INTERNAL_
 #endif  // Guard

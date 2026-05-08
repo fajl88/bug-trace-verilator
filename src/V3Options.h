@@ -356,6 +356,7 @@ private:
     int         m_traceMaxWidth = 4096; // main switch: --trace-max-width
     string      m_traceCausalityOutput;  // main switch: --trace-causality-output
     string      m_traceCausalitySinks;  // main switch: --trace-causality-sinks
+    string      m_traceCausalityPrecisionMode = "strict_read_v1";  // --trace-causality-precision-mode
     string      m_faultInjectConfig;  // main switch: --fault-inject-config
     int         m_unrollCount = 64;  // main switch: --unroll-count
     int         m_unrollLimit = 16384;  // main switch: --unroll-limit
@@ -656,6 +657,7 @@ public:
     int traceMaxWidth() const { return m_traceMaxWidth; }
     string traceCausalityOutput() const { return m_traceCausalityOutput; }
     string traceCausalitySinks() const { return m_traceCausalitySinks; }
+    string traceCausalityPrecisionMode() const { return m_traceCausalityPrecisionMode; }
     string faultInjectConfig() const { return m_faultInjectConfig; }
     bool useTraceParallel() const {
         return trace() && traceEnabledVcd() && (threads() > 1 || hierChild() > 1);

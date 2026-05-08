@@ -46,7 +46,16 @@ class AstNodeAssign VL_NOT_FINAL : public AstNodeStmt {
     // @astgen op1 := rhsp : AstNodeExpr
     // @astgen op2 := lhsp : AstNodeExpr
     // @astgen op3 := timingControlp : Optional[AstNode]
+public:
+    struct TraceWriteSitePredEdge final {
+        AstVarScope* predp = nullptr;
+        uint8_t role = 0;
+    };
+
 protected:
+    uint32_t m_traceWriteSiteId = 0;  // Stable ID for strict write-site causality (0 = unset)
+    std::vector<TraceWriteSitePredEdge> m_traceWriteSitePredEdges;  // Per-site static roles (esp. 2–6)
+
     AstNodeAssign(VNType t, FileLine* fl, AstNodeExpr* lhsp, AstNodeExpr* rhsp,
                   AstNode* timingControlp = nullptr)
         : AstNodeStmt{t, fl} {
@@ -58,6 +67,19 @@ protected:
 
 public:
     ASTGEN_MEMBERS_AstNodeAssign;
+    uint32_t traceWriteSiteId() const { return m_traceWriteSiteId; }
+    void traceWriteSiteId(uint32_t id) { m_traceWriteSiteId = id; }
+    void traceWriteSitePredEdgesClear() { m_traceWriteSitePredEdges.clear(); }
+    void traceWriteSitePredEdgeAdd(AstVarScope* predp, uint8_t role) {
+        if (!predp) return;
+        for (const TraceWriteSitePredEdge& existing : m_traceWriteSitePredEdges) {
+            if (existing.predp == predp && existing.role == role) return;
+        }
+        m_traceWriteSitePredEdges.push_back(TraceWriteSitePredEdge{predp, role});
+    }
+    const std::vector<TraceWriteSitePredEdge>& traceWriteSitePredEdges() const {
+        return m_traceWriteSitePredEdges;
+    }
     // Clone single node, just get same type back.
     virtual AstNodeAssign* cloneType(AstNodeExpr* lhsp, AstNodeExpr* rhsp) = 0;
     bool hasDType() const override VL_MT_SAFE { return true; }

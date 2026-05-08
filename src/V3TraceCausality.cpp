@@ -171,3 +171,164 @@ void V3TraceCausality::causalityAll(AstNetlist* nodep) {
     { TraceCausalityVisitor{nodep}; }
     V3Global::dumpCheckGlobalTree("tracecausality", 0, dumpTreeEitherLevel() >= 3);
 }
+
+namespace {
+
+class WriteSiteAnnotateVisitor final : public VNVisitor {
+    uint32_t m_nextWriteSiteId = 1;
+    std::vector<AstVarScope*> m_activePreds;
+    std::vector<AstVarScope*> m_ctrlPreds;
+
+    static void appendUnique(std::vector<AstVarScope*>& vec, AstVarScope* vscp) {
+        if (!vscp) return;
+        for (AstVarScope* const existingp : vec) {
+            if (existingp == vscp) return;
+        }
+        vec.push_back(vscp);
+    }
+
+    static std::vector<AstVarScope*> collectReadPreds(AstNode* nodep) {
+        std::vector<AstVarScope*> predps;
+        if (!nodep) return predps;
+        nodep->foreach([&predps](AstVarRef* refp) {
+            if (refp->access().isWriteOnly()) return;
+            appendUnique(predps, refp->varScopep());
+        });
+        nodep->foreach([&predps](AstNodeFTaskRef* callp) {
+            if (!callp) return;
+            if (AstNodeFTask* const taskp = callp->taskp()) {
+                taskp->foreach([&predps](AstVarRef* refp) {
+                    if (refp->access().isWriteOnly()) return;
+                    appendUnique(predps, refp->varScopep());
+                });
+            } else {
+                for (AstNode* argnodep = callp->argsp(); argnodep; argnodep = argnodep->nextp()) {
+                    AstArg* const argp = VN_CAST(argnodep, Arg);
+                    if (!argp) continue;
+                    for (AstVarScope* const predp : collectReadPreds(argp->exprp())) {
+                        appendUnique(predps, predp);
+                    }
+                }
+            }
+        });
+        return predps;
+    }
+
+    static std::vector<AstVarScope*> collectCondPreds(AstNode* nodep) {
+        std::vector<AstVarScope*> predps;
+        if (!nodep) return predps;
+        nodep->foreach([&predps](AstCond* condp) {
+            if (!condp->condp()) return;
+            for (AstVarScope* const predp : collectReadPreds(condp->condp())) appendUnique(predps, predp);
+        });
+        return predps;
+    }
+
+    static std::vector<AstVarScope*> collectWrittenSinks(AstNode* nodep) {
+        std::vector<AstVarScope*> sinkps;
+        if (!nodep) return sinkps;
+        nodep->foreach([&sinkps](AstVarRef* refp) {
+            if (!refp->access().isWriteOrRW()) return;
+            appendUnique(sinkps, refp->varScopep());
+        });
+        return sinkps;
+    }
+
+    static void addAssignSiteRolePreds(AstNodeAssign* assignp,
+                                       const std::vector<AstVarScope*>& sinkps,
+                                       const std::vector<AstVarScope*>& predps, CausalityRole role) {
+        for (AstVarScope* const predp : predps) {
+            if (!predp) continue;
+            if (role == CausalityRole::DATA) {
+                bool skip = false;
+                for (AstVarScope* const sinkp : sinkps) {
+                    if (predp == sinkp) {
+                        skip = true;
+                        break;
+                    }
+                }
+                if (skip) continue;
+            }
+            assignp->traceWriteSitePredEdgeAdd(predp, static_cast<uint8_t>(role));
+        }
+    }
+
+    void visit(AstNetlist* nodep) override {
+        nodep->foreach([](AstNodeAssign* assignp) {
+            assignp->traceWriteSitePredEdgesClear();
+            assignp->traceWriteSiteId(0);
+        });
+        iterateChildren(nodep);
+    }
+
+    void visit(AstActive* nodep) override {
+        const std::vector<AstVarScope*> savedPreds = m_activePreds;
+        m_activePreds.clear();
+        if (AstSenTree* const sentreep = nodep->sentreep()) {
+            sentreep->foreach([this](AstVarRef* refp) {
+                if (refp->access().isWriteOnly()) return;
+                appendUnique(m_activePreds, refp->varScopep());
+            });
+        }
+        iterateChildren(nodep);
+        m_activePreds = savedPreds;
+    }
+
+    void visit(AstIf* nodep) override {
+        const size_t oldSize = m_ctrlPreds.size();
+        for (AstVarScope* const predp : collectReadPreds(nodep->condp())) appendUnique(m_ctrlPreds, predp);
+        iterateChildren(nodep);
+        m_ctrlPreds.resize(oldSize);
+    }
+
+    void visit(AstCase* nodep) override {
+        const size_t oldSize = m_ctrlPreds.size();
+        for (AstVarScope* const predp : collectReadPreds(nodep->exprp())) appendUnique(m_ctrlPreds, predp);
+        for (AstCaseItem* itemp = nodep->itemsp(); itemp; itemp = VN_AS(itemp->nextp(), CaseItem)) {
+            for (AstNode* condsp = itemp->condsp(); condsp; condsp = condsp->nextp()) {
+                for (AstVarScope* const predp : collectReadPreds(condsp)) appendUnique(m_ctrlPreds, predp);
+            }
+        }
+        iterateChildren(nodep);
+        m_ctrlPreds.resize(oldSize);
+    }
+
+    void visit(AstNodeAssign* nodep) override {
+        nodep->traceWriteSitePredEdgesClear();
+        nodep->traceWriteSiteId(m_nextWriteSiteId++);
+        const std::vector<AstVarScope*> sinkps = collectWrittenSinks(nodep->lhsp());
+        std::vector<AstVarScope*> predps = collectReadPreds(nodep->rhsp());
+        const std::vector<AstVarScope*> condPreds = collectCondPreds(nodep->rhsp());
+        if (nodep->timingControlp()) {
+            for (AstVarScope* const predp : collectReadPreds(nodep->timingControlp())) {
+                appendUnique(predps, predp);
+            }
+        }
+        addAssignSiteRolePreds(nodep, sinkps, predps, CausalityRole::DATA);
+        addAssignSiteRolePreds(nodep, sinkps, condPreds, CausalityRole::CONTROL_GUARD);
+        addAssignSiteRolePreds(nodep, sinkps, m_ctrlPreds, CausalityRole::CONTROL_GUARD);
+        addAssignSiteRolePreds(nodep, sinkps, m_activePreds, CausalityRole::SEQUENTIAL_TRIGGER);
+        if (VN_IS(nodep, AssignDly)) {
+            for (AstVarScope* const sinkp : sinkps) {
+                if (!sinkp) continue;
+                nodep->traceWriteSitePredEdgeAdd(sinkp, static_cast<uint8_t>(CausalityRole::PRIOR_STATE));
+            }
+        }
+        iterateChildren(nodep);
+    }
+
+    void visit(AstNode* nodep) override { iterateChildren(nodep); }
+
+public:
+    explicit WriteSiteAnnotateVisitor(AstNetlist* nodep) { iterate(nodep); }
+};
+
+}  // namespace
+
+void V3TraceCausality::writeSiteAnnotateAll(AstNetlist* nodep) {
+    if (!v3Global.opt.traceCausality()) return;
+    if (v3Global.opt.traceCausalityPrecisionMode() != "strict_read_v1") return;
+    UINFO(2, __FUNCTION__ << ":");
+    { WriteSiteAnnotateVisitor{nodep}; }
+    V3Global::dumpCheckGlobalTree("tracewritesite", 0, dumpTreeEitherLevel() >= 3);
+}

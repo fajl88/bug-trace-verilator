@@ -1156,7 +1156,7 @@ class TraceVisitor final : public VNVisitor {
         std::ofstream os{outputPath};
         if (!os) return;
 
-        os << "{\"format\":\"trace_causality_static_graph\",\"version\":1,\"nodes\":[";
+        os << "{\"format\":\"trace_causality_static_graph\",\"version\":2,\"nodes\":[";
         bool first = true;
         for (const auto& pair : declByCode) {
             if (!first) os << ",";

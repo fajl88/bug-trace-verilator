@@ -110,20 +110,7 @@ public:
         : m_useParallel{useParallel} {}
 };
 
-//=============================================================================
-// VerilatedTraceBaseC - base class of all Verilated*C trace classes
-// Internal use only
-
-class VerilatedTraceBaseC VL_NOT_FINAL {
-    bool m_modelConnected = false;  // Model connected by calling Verilated::trace()
-public:
-    /// True if file currently open
-    virtual bool isOpen() const VL_MT_SAFE = 0;
-
-    // internal use only
-    bool modelConnected() const VL_MT_SAFE { return m_modelConnected; }
-    void modelConnected(bool flag) VL_MT_SAFE { m_modelConnected = flag; }
-};
+#include "verilated_trace_base_c.h"
 
 //=============================================================================
 // VerilatedTrace
@@ -234,6 +221,7 @@ private:
     std::string m_causalityOutputPath;  // Runtime event sidecar path
     std::string m_causalityStaticGraphPath;  // Compile-time static graph path
     std::string m_causalitySinksFilter;  // Optional sink filter text
+    std::string m_causalityPrecisionMode;  // Runtime precision mode descriptor
     std::ofstream m_causalityStream;  // Runtime event stream
     mutable std::mutex m_causalityMutex;  // Separate lock to avoid trace re-entrancy deadlocks
 
@@ -342,10 +330,16 @@ public:
     void addCleanupCb(cleanupCb_t cb, void* userp) VL_MT_SAFE;
     void initLib(const std::string& name) VL_MT_UNSAFE;
     void configureCausality(const std::string& outputPath, const std::string& staticGraphPath,
-                            const std::string& sinkFilter) VL_MT_SAFE;
+                            const std::string& sinkFilter, const std::string& precisionMode)
+        VL_MT_SAFE;
     bool causalityEnabled() const VL_MT_SAFE { return m_causalityEnabled; }
     void causalityEmit(uint64_t timeui, uint32_t sinkCode, const uint32_t* predCodes,
-                      const uint8_t* predRoles, uint32_t predCount, bool valueChanged)
+                      const uint8_t* predRoles, const int8_t* predTimeDeltas, uint32_t predCount,
+                      bool valueChanged)
+        VL_MT_SAFE_EXCLUDES(m_mutex);
+    void causalityEmit(uint64_t timeui, uint32_t sinkCode, uint32_t writeSiteId,
+                      const uint32_t* predCodes, const uint8_t* predRoles,
+                      const int8_t* predTimeDeltas, uint32_t predCount, bool valueChanged)
         VL_MT_SAFE_EXCLUDES(m_mutex);
 };
 
@@ -394,8 +388,16 @@ public:
     VL_ATTR_ALWINLINE uint32_t* oldp(uint32_t code) { return m_sigs_oldvalp + code; }
     bool causalityEnabled() const { return this->m_owner.causalityEnabled(); }
     void causalityEmit(uint64_t timeui, uint32_t sinkCode, const uint32_t* predCodes,
-                      const uint8_t* predRoles, uint32_t predCount, bool valueChanged) {
-        this->m_owner.causalityEmit(timeui, sinkCode, predCodes, predRoles, predCount, valueChanged);
+                      const uint8_t* predRoles, const int8_t* predTimeDeltas,
+                      uint32_t predCount, bool valueChanged) {
+        this->m_owner.causalityEmit(timeui, sinkCode, predCodes, predRoles, predTimeDeltas,
+                                    predCount, valueChanged);
+    }
+    void causalityEmit(uint64_t timeui, uint32_t sinkCode, uint32_t writeSiteId,
+                      const uint32_t* predCodes, const uint8_t* predRoles,
+                      const int8_t* predTimeDeltas, uint32_t predCount, bool valueChanged) {
+        this->m_owner.causalityEmit(timeui, sinkCode, writeSiteId, predCodes, predRoles,
+                                    predTimeDeltas, predCount, valueChanged);
     }
 
     // Write to previous value buffer value and emit trace entry.

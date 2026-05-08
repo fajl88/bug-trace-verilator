@@ -21,6 +21,7 @@
 #include "V3ThreadPool.h"
 #include "V3UniqueNames.h"
 
+#include <algorithm>
 #include <map>
 #include <set>
 #include <vector>
@@ -597,6 +598,7 @@ class EmitCTrace final : public EmitCFunc {
     V3UniqueNames m_uniqueNames;  // Generates unique file names
     const std::string m_fileBaseName = EmitCUtil::topClassName() + "_" + protect("_Trace");
     std::map<uint32_t, const AstTraceDecl*> m_traceDeclByCode;
+    std::map<const AstVarScope*, std::vector<uint32_t>> m_traceCodesByVscp;
 
     // METHODS
     void openNextOutputFile() {
@@ -625,6 +627,12 @@ class EmitCTrace final : public EmitCFunc {
         } else if (it->second->causalityPredCodeEdges().empty()
                    && !nodep->causalityPredCodeEdges().empty()) {
             it->second = nodep;
+        }
+        if (const AstVarScope* const sourcep = nodep->causalitySourceVscp()) {
+            std::vector<uint32_t>& codes = m_traceCodesByVscp[sourcep];
+            if (std::find(codes.begin(), codes.end(), nodep->code()) == codes.end()) {
+                codes.push_back(nodep->code());
+            }
         }
     }
 
@@ -809,8 +817,12 @@ class EmitCTrace final : public EmitCFunc {
         const AstTraceDecl* const metaDeclp = findTraceDeclByCode(code);
         const auto& predEdges = metaDeclp ? metaDeclp->causalityPredCodeEdges()
                                           : nodep->declp()->causalityPredCodeEdges();
+        const bool causalityStrictAssignSites
+            = v3Global.opt.traceCausality()
+              && v3Global.opt.traceCausalityPrecisionMode() == "strict_read_v1";
         const std::string changedVar = "__Vtrace_changed_" + cvtToStr(code);
-        if (v3Global.opt.traceCausality() && nodep->traceType() != VTraceType::CONSTANT) {
+        if (v3Global.opt.traceCausality() && nodep->traceType() != VTraceType::CONSTANT
+            && !causalityStrictAssignSites) {
             puts("const bool " + changedVar + " = bufp->causalityChanged" + stype + "(oldp+");
             puts(cvtToStr(code - nodep->baseCode()));
             puts(",");
@@ -831,33 +843,46 @@ class EmitCTrace final : public EmitCFunc {
         if (emitWidth) puts("," + cvtToStr(nodep->declp()->widthMin()));
         puts(");\n");
         if (v3Global.opt.traceCausality() && nodep->traceType() != VTraceType::CONSTANT) {
-            const std::string predCodesVar = "__Vpred_codes_" + cvtToStr(code);
-            const std::string predRolesVar = "__Vpred_roles_" + cvtToStr(code);
-            if (!predEdges.empty()) {
-                puts("static const uint32_t " + predCodesVar + "[] = {");
-                for (size_t idx = 0; idx < predEdges.size(); ++idx) {
-                    if (idx) puts(",");
-                    puts(cvtToStr(predEdges[idx].predCode));
-                }
-                puts("};\n");
-                puts("static const uint8_t " + predRolesVar + "[] = {");
-                for (size_t idx = 0; idx < predEdges.size(); ++idx) {
-                    if (idx) puts(",");
-                    puts(cvtToStr(static_cast<uint32_t>(predEdges[idx].role)));
-                }
-                puts("};\n");
-                puts("bufp->causalityEmit(vlSymsp->_vm_contextp__->time(), ");
-                puts(cvtToStr(code));
-                puts(", " + predCodesVar + ", " + predRolesVar + ", ");
-                puts(cvtToStr(predEdges.size()));
-                puts(", " + changedVar);
-                puts(");\n");
+            if (causalityStrictAssignSites) {
+                // strict_read_v1 emits causality from executed AstNodeAssign (write_site_id).
             } else {
-                puts("bufp->causalityEmit(vlSymsp->_vm_contextp__->time(), ");
-                puts(cvtToStr(code));
-                puts(", nullptr, nullptr, 0, ");
-                puts(changedVar);
-                puts(");\n");
+                const std::string predCodesVar = "__Vpred_codes_" + cvtToStr(code);
+                const std::string predRolesVar = "__Vpred_roles_" + cvtToStr(code);
+                const std::string predDeltaVar = "__Vpred_time_delta_" + cvtToStr(code);
+                if (!predEdges.empty()) {
+                    puts("static const uint32_t " + predCodesVar + "[] = {");
+                    for (size_t idx = 0; idx < predEdges.size(); ++idx) {
+                        if (idx) puts(",");
+                        puts(cvtToStr(predEdges[idx].predCode));
+                    }
+                    puts("};\n");
+                    puts("static const uint8_t " + predRolesVar + "[] = {");
+                    for (size_t idx = 0; idx < predEdges.size(); ++idx) {
+                        if (idx) puts(",");
+                        puts(cvtToStr(static_cast<uint32_t>(predEdges[idx].role)));
+                    }
+                    puts("};\n");
+                    puts("static const int8_t " + predDeltaVar + "[] = {");
+                    for (size_t idx = 0; idx < predEdges.size(); ++idx) {
+                        if (idx) puts(",");
+                        const int32_t delta
+                            = predEdges[idx].role == 4 /*prior_state*/ ? -1 : 0;
+                        puts(cvtToStr(delta));
+                    }
+                    puts("};\n");
+                    puts("bufp->causalityEmit(vlSymsp->_vm_contextp__->time(), ");
+                    puts(cvtToStr(code));
+                    puts(", " + predCodesVar + ", " + predRolesVar + ", " + predDeltaVar + ", ");
+                    puts(cvtToStr(predEdges.size()));
+                    puts(", " + changedVar);
+                    puts(");\n");
+                } else {
+                    puts("bufp->causalityEmit(vlSymsp->_vm_contextp__->time(), ");
+                    puts(cvtToStr(code));
+                    puts(", nullptr, nullptr, nullptr, 0, ");
+                    puts(changedVar);
+                    puts(");\n");
+                }
             }
         }
     }

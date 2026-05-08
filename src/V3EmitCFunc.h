@@ -144,6 +144,7 @@ class EmitCFunc VL_NOT_FINAL : public EmitCConstInit {
     std::unordered_map<AstJumpBlock*, size_t> m_labelNumbers;  // Label numbers for AstJumpBlocks
     std::unordered_map<const AstVar*, uint32_t> m_traceCodeByVar;
     std::unordered_map<const AstVarScope*, uint32_t> m_traceCodeByVarScope;
+    std::map<const AstVarScope*, std::vector<uint32_t>> m_traceCodesAllByVscp;
     std::unordered_map<std::string, uint32_t> m_traceCodeByShowname;
     bool m_traceCodeMapInit = false;
     bool m_faultConfigInit = false;
@@ -214,7 +215,13 @@ class EmitCFunc VL_NOT_FINAL : public EmitCConstInit {
             if (!declp->codeAssigned() || declp->inDtypeFunc() || declp->arrayRange().ranged()) return;
             if (const AstVarRef* const varrefp = VN_CAST(declp->valuep(), VarRef)) {
                 if (varrefp->varp()) m_traceCodeByVar.emplace(varrefp->varp(), declp->code());
-                if (varrefp->varScopep()) m_traceCodeByVarScope.emplace(varrefp->varScopep(), declp->code());
+                if (varrefp->varScopep()) {
+                    m_traceCodeByVarScope.emplace(varrefp->varScopep(), declp->code());
+                    auto& vec = m_traceCodesAllByVscp[varrefp->varScopep()];
+                    if (std::find(vec.begin(), vec.end(), declp->code()) == vec.end()) {
+                        vec.push_back(declp->code());
+                    }
+                }
             }
             const std::string showname = declp->showname();
             const auto it = m_traceCodeByShowname.find(showname);
@@ -247,6 +254,122 @@ class EmitCFunc VL_NOT_FINAL : public EmitCConstInit {
         }
         return 0;
     }
+
+    void emitAppendPredCodesForVarScopeStrict(const AstVarScope* vscp, const std::string& appendFn,
+                                              uint32_t role) {
+        const auto it = m_traceCodesAllByVscp.find(vscp);
+        if (it == m_traceCodesAllByVscp.end()) return;
+        for (uint32_t code : it->second) {
+            puts(appendFn + "(" + cvtToStr(code) + ", " + cvtToStr(role)
+                 + ", " + cvtToStr(role == 4 ? -1 : 0) + ");\n");
+        }
+    }
+
+    void emitStrictReadPredCollectionAssign(const AstNodeExpr* exprp, const std::string& appendFn,
+                                            uint32_t dataRole, uint32_t controlRole) {
+        if (!exprp) return;
+        if (exprp->dtypep() && exprp->dtypep()->isFourstate()) {
+            puts("VL_FATAL_MT(__FILE__, __LINE__, \"\", "
+                 "\"trace-causality strict_read_v1 rejects four-state/XZ expressions\");\n");
+            return;
+        }
+        if (const AstVarRef* const refp = VN_CAST(exprp, VarRef)) {
+            emitAppendPredCodesForVarScopeStrict(refp->varScopep(), appendFn, dataRole);
+            return;
+        }
+        if (VN_IS(exprp, Const)) return;
+        if (const AstCond* const condp = VN_CAST(exprp, Cond)) {
+            emitStrictReadPredCollectionAssign(condp->condp(), appendFn, controlRole, controlRole);
+            puts("if (");
+            iterateConst(const_cast<AstNodeExpr*>(condp->condp()));
+            puts(") {\n");
+            emitStrictReadPredCollectionAssign(condp->thenp(), appendFn, dataRole, controlRole);
+            puts("} else {\n");
+            emitStrictReadPredCollectionAssign(condp->elsep(), appendFn, dataRole, controlRole);
+            puts("}\n");
+            return;
+        }
+        if (VN_IS(exprp, NodeFTaskRef)) {
+            puts("VL_FATAL_MT(__FILE__, __LINE__, \"\", "
+                 "\"trace-causality strict_read_v1 does not support task/function call expressions\");\n");
+            return;
+        }
+        const auto recurseList = [&](AstNode* rootp) {
+            for (AstNode* childp = rootp; childp; childp = childp->nextp()) {
+                if (const AstNodeExpr* const childExprp = VN_CAST(childp, NodeExpr)) {
+                    emitStrictReadPredCollectionAssign(childExprp, appendFn, dataRole, controlRole);
+                }
+            }
+        };
+        recurseList(exprp->op1p());
+        recurseList(exprp->op2p());
+        recurseList(exprp->op3p());
+        recurseList(exprp->op4p());
+    }
+
+    void emitStrictWriteSiteCausality(AstNodeAssign* nodep) {
+        if (!v3Global.opt.traceCausality()) return;
+        if (v3Global.opt.traceCausalityPrecisionMode() != "strict_read_v1") return;
+        if (!nodep->traceWriteSiteId()) return;
+        if (nodep->dtypep() && nodep->dtypep()->skipRefp()->isFourstate()) {
+            puts("VL_FATAL_MT(__FILE__, __LINE__, \"\", "
+                 "\"trace-causality strict_write_site rejects four-state/XZ assignment dtype\");\n");
+            return;
+        }
+        initTraceCodeMap();
+        std::vector<uint32_t> sinkCodes;
+        nodep->lhsp()->foreach([&](AstVarRef* refp) {
+            if (!refp->access().isWriteOrRW()) return;
+            const uint32_t code = traceCodeForVar(refp->varp(), refp->varScopep());
+            if (!code) return;
+            if (std::find(sinkCodes.begin(), sinkCodes.end(), code) == sinkCodes.end()) {
+                sinkCodes.push_back(code);
+            }
+        });
+        if (sinkCodes.empty()) return;
+
+        const std::string siteStr = cvtToStr(nodep->traceWriteSiteId());
+        for (uint32_t sinkCode : sinkCodes) {
+            const std::string suf = siteStr + "_" + cvtToStr(sinkCode);
+            const std::string pcVar = "__Vws_pc_" + suf;
+            const std::string prVar = "__Vws_pr_" + suf;
+            const std::string pdVar = "__Vws_pd_" + suf;
+            const std::string cnVar = "__Vws_cn_" + suf;
+            const std::string apVar = "__Vws_ap_" + suf;
+            puts("if (VL_UNLIKELY(vlSymsp->_vm_contextp__->causalityTraceFilep())) {\n");
+            puts("uint32_t " + pcVar + "[512];\n");
+            puts("uint8_t " + prVar + "[512];\n");
+            puts("int8_t " + pdVar + "[512];\n");
+            puts("uint32_t " + cnVar + " = 0;\n");
+            puts("auto " + apVar + " = [&](uint32_t __Vpred, uint8_t __Vrole, int8_t __Vdelta) {\n");
+            puts("for (uint32_t __Vi = 0; __Vi < " + cnVar + "; ++__Vi) {\n");
+            puts("if (" + pcVar + "[__Vi] == __Vpred && " + prVar + "[__Vi] == __Vrole && " + pdVar
+                 + "[__Vi] == __Vdelta) return;\n");
+            puts("}\n");
+            puts("if (" + cnVar + " >= 512) {\n");
+            puts("VL_FATAL_MT(__FILE__, __LINE__, \"\", "
+                 "\"trace-causality strict_write_site predecessor buffer overflow\");\n");
+            puts("}\n");
+            puts(pcVar + "[" + cnVar + "] = __Vpred;\n");
+            puts(prVar + "[" + cnVar + "] = __Vrole;\n");
+            puts(pdVar + "[" + cnVar + "] = __Vdelta;\n");
+            puts("++" + cnVar + ";\n");
+            puts("};\n");
+            emitStrictReadPredCollectionAssign(nodep->rhsp(), apVar, 1, 2);
+            for (const AstNodeAssign::TraceWriteSitePredEdge& edge : nodep->traceWriteSitePredEdges()) {
+                if (edge.role == 1) continue;  // DATA taken-path handled dynamically above
+                emitAppendPredCodesForVarScopeStrict(edge.predp, apVar, edge.role);
+            }
+            puts("vlSymsp->_vm_contextp__->causalityTraceFilep()->causalityEmitFromEval(");
+            puts("vlSymsp->_vm_contextp__->time(), ");
+            puts(cvtToStr(sinkCode));
+            puts(", ");
+            puts(siteStr);
+            puts(", " + pcVar + ", " + prVar + ", " + pdVar + ", " + cnVar + ", true);\n");
+            puts("}\n");
+        }
+    }
+
     void initFaultConfig() {
         if (m_faultConfigInit) return;
         m_faultConfigInit = true;
@@ -718,7 +841,9 @@ public:
                 lhsCanonical = lhsVrp->varp() ? lhsVrp->varp()->name() : "unknown";
                 traceSiteCode = traceCodeForVar(lhsVrp->varp(), lhsVrp->varScopep());
             }
-            assignmentUid = traceSiteCode ? traceSiteCode : m_nextAssignmentUid++;
+            // Unique per AssignDly so (site_code, assignment_uid) is a manifest primary key
+            // when multiple seq_d statements target the same traced LHS (e.g. FSM case arms).
+            assignmentUid = m_nextAssignmentUid++;
             if (m_faultCfg.enabled) {
                 const FaultManifestRow row{assignmentUid, traceSiteCode, "seq_d", lhsCanonical,
                                            sourceLoc(nodep),
@@ -916,6 +1041,7 @@ public:
             iterateAndNextConstNull(nodep->lhsp());
             puts(");\n");
         }
+        emitStrictWriteSiteCausality(nodep);
     }
     void visit(AstAssocSel* nodep) override {
         iterateAndNextConstNull(nodep->fromp());

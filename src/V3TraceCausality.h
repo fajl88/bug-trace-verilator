@@ -27,6 +27,8 @@ class AstNetlist;
 class V3TraceCausality final {
 public:
     static void causalityAll(AstNetlist* nodep) VL_MT_DISABLED;
+    /// Late pass: annotate each AstNodeAssign with stable write-site id + per-site predecessors.
+    static void writeSiteAnnotateAll(AstNetlist* nodep) VL_MT_DISABLED;
 };
 
 #endif  // Guard

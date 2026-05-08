@@ -603,7 +603,9 @@ class EmitCModel final : public EmitCFunc {
             const std::string eventsPath
                 = v3Global.opt.makeDir() + "/" + v3Global.opt.prefix() + "__trace_events.jsonl";
             puts(/**/ "stfp->spTrace()->configureCausality("s + "\"" + eventsPath + "\", \""
-                 + staticGraph + "\", \"" + v3Global.opt.traceCausalitySinks() + "\");\n");
+                 + staticGraph + "\", \"" + v3Global.opt.traceCausalitySinks() + "\", \""
+                 + v3Global.opt.traceCausalityPrecisionMode() + "\");\n");
+            puts(/**/ "vlSymsp->_vm_contextp__->causalityTraceFilep(stfp);\n");
         }
         puts(/**/ topModNameProtected + "__" + protect("trace_register")
              + "(&(vlSymsp->TOP), stfp->spTrace());\n");
