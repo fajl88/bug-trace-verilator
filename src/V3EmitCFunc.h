@@ -150,6 +150,7 @@ class EmitCFunc VL_NOT_FINAL : public EmitCConstInit {
     bool m_faultConfigInit = false;
     FaultConfig m_faultCfg;
     uint32_t m_nextAssignmentUid = 1;
+    uint32_t m_strictTriSeq = 0;  // uniquify temps in strict tri-state cond pred emission
     uint32_t m_rewriteCount = 0;
     std::vector<FaultManifestRow> m_faultManifestRows;
     std::string m_faultManifestPath;
@@ -265,28 +266,93 @@ class EmitCFunc VL_NOT_FINAL : public EmitCConstInit {
         }
     }
 
-    void emitStrictReadPredCollectionAssign(const AstNodeExpr* exprp, const std::string& appendFn,
-                                            uint32_t dataRole, uint32_t controlRole) {
-        if (!exprp) return;
-        if (exprp->dtypep() && exprp->dtypep()->isFourstate()) {
-            puts("VL_FATAL_MT(__FILE__, __LINE__, \"\", "
-                 "\"trace-causality strict_read_v1 rejects four-state/XZ expressions\");\n");
+    void emitAppendPredCodesForVarRefStrict(const AstVarRef* refp, const std::string& appendFn,
+                                            uint32_t role) {
+        if (!refp) return;
+        if (refp->varScopep()) {
+            emitAppendPredCodesForVarScopeStrict(refp->varScopep(), appendFn, role);
             return;
         }
-        if (const AstVarRef* const refp = VN_CAST(exprp, VarRef)) {
-            emitAppendPredCodesForVarScopeStrict(refp->varScopep(), appendFn, dataRole);
+        const uint32_t code = traceCodeForVar(refp->varp(), nullptr);
+        if (!code) return;
+        puts(appendFn + "(" + cvtToStr(code) + ", " + cvtToStr(role)
+             + ", " + cvtToStr(role == 4 ? -1 : 0) + ");\n");
+    }
+
+    static const AstVarRef* strictReadPredBaseVarRef(const AstNodeExpr* exprp) {
+        const AstNodeExpr* walkp = exprp;
+        for (;;) {
+            if (const AstArraySel* const asp = VN_CAST(walkp, ArraySel)) {
+                walkp = asp->fromp();
+                continue;
+            }
+            if (const AstSel* const ssp = VN_CAST(walkp, Sel)) {
+                walkp = ssp->fromp();
+                continue;
+            }
+            if (const AstMemberSel* const msp = VN_CAST(walkp, MemberSel)) {
+                walkp = msp->fromp();
+                continue;
+            }
+            if (const AstStructSel* const stp = VN_CAST(walkp, StructSel)) {
+                walkp = stp->fromp();
+                continue;
+            }
+            break;
+        }
+        return VN_CAST(walkp, VarRef);
+    }
+
+    void emitStrictReadPredCollectionAssign(const AstNodeExpr* exprp, const std::string& appendFn,
+                                            uint32_t dataRole, uint32_t controlRole,
+                                            bool allowFourStateExpr = false) {
+        if (!exprp) return;
+        // AstCond must be handled before generic four-state rejection: the overall expression may
+        // be four-state-typed while still needing tri-state dispatch on the condition value.
+        if (const AstCond* const condp = VN_CAST(exprp, Cond)) {
+            emitStrictReadPredCollectionAssign(condp->condp(), appendFn, controlRole, controlRole,
+                                               true);
+            const uint32_t triSeq = ++m_strictTriSeq;
+            const std::string vScalar = "__Vtc_s_" + cvtToStr(triSeq);
+            const std::string vRed = "__Vtc_r_" + cvtToStr(triSeq);
+            if (condp->condp()->isWide()) {
+                const int condBits = condp->condp()->widthMin();
+                const std::string words = "VL_WORDS_I(" + cvtToStr(condBits) + ")";
+                puts("{\n");
+                puts("WData " + vScalar + "[" + words + "];\n");
+                puts("VL_ASSIGN_W(" + cvtToStr(condBits) + ", " + vScalar + ", ");
+                iterateConst(const_cast<AstNodeExpr*>(condp->condp()));
+                puts(");\n");
+                puts("const IData " + vRed + " = VL_REDOR_W(" + words + ", " + vScalar + ");\n");
+                puts("if (" + vRed + ") {\n");
+                emitStrictReadPredCollectionAssign(condp->thenp(), appendFn, dataRole, controlRole);
+                puts("} else if (!" + vRed + ") {\n");
+                emitStrictReadPredCollectionAssign(condp->elsep(), appendFn, dataRole, controlRole);
+                puts("} else {\n");
+                puts("}\n");  // unknown select: control preds only (already collected)
+                puts("}\n");
+            } else {
+                puts("{\n");
+                puts("const auto " + vScalar + " = ");
+                iterateConst(const_cast<AstNodeExpr*>(condp->condp()));
+                puts(";\n");
+                puts("if (" + vScalar + " != static_cast<decltype(" + vScalar + ")>(0)) {\n");
+                emitStrictReadPredCollectionAssign(condp->thenp(), appendFn, dataRole, controlRole);
+                puts("} else if (" + vScalar + " == static_cast<decltype(" + vScalar + ")>(0)) {\n");
+                emitStrictReadPredCollectionAssign(condp->elsep(), appendFn, dataRole, controlRole);
+                puts("} else {\n");
+                puts("}\n");  // unknown select: control preds only (already collected)
+                puts("}\n");
+            }
             return;
         }
         if (VN_IS(exprp, Const)) return;
-        if (const AstCond* const condp = VN_CAST(exprp, Cond)) {
-            emitStrictReadPredCollectionAssign(condp->condp(), appendFn, controlRole, controlRole);
-            puts("if (");
-            iterateConst(const_cast<AstNodeExpr*>(condp->condp()));
-            puts(") {\n");
-            emitStrictReadPredCollectionAssign(condp->thenp(), appendFn, dataRole, controlRole);
-            puts("} else {\n");
-            emitStrictReadPredCollectionAssign(condp->elsep(), appendFn, dataRole, controlRole);
-            puts("}\n");
+        if (const AstVarRef* const refp = VN_CAST(exprp, VarRef)) {
+            emitAppendPredCodesForVarRefStrict(refp, appendFn, dataRole);
+            return;
+        }
+        if (const AstVarRef* const baseRefp = strictReadPredBaseVarRef(exprp)) {
+            emitAppendPredCodesForVarRefStrict(baseRefp, appendFn, dataRole);
             return;
         }
         if (VN_IS(exprp, NodeFTaskRef)) {
@@ -311,11 +377,6 @@ class EmitCFunc VL_NOT_FINAL : public EmitCConstInit {
         if (!v3Global.opt.traceCausality()) return;
         if (v3Global.opt.traceCausalityPrecisionMode() != "strict_read_v1") return;
         if (!nodep->traceWriteSiteId()) return;
-        if (nodep->dtypep() && nodep->dtypep()->skipRefp()->isFourstate()) {
-            puts("VL_FATAL_MT(__FILE__, __LINE__, \"\", "
-                 "\"trace-causality strict_write_site rejects four-state/XZ assignment dtype\");\n");
-            return;
-        }
         initTraceCodeMap();
         std::vector<uint32_t> sinkCodes;
         nodep->lhsp()->foreach([&](AstVarRef* refp) {
