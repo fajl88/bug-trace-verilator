@@ -25,6 +25,8 @@
 # error "verilated_trace_base_c.h must be included after verilated.h"
 #endif
 
+#include <string>
+
 //=============================================================================
 // VerilatedTraceBaseC - base class of all Verilated*C trace classes
 // Internal use only
@@ -39,7 +41,8 @@ public:
     virtual void causalityEmitFromEval(uint64_t timeui, uint32_t sinkCode, uint32_t writeSiteId,
                                        const uint32_t* predCodes, const uint8_t* predRoles,
                                        const int8_t* predTimeDeltas, uint32_t predCount,
-                                       bool valueChanged) VL_MT_SAFE {
+                                       bool valueChanged,
+                                       const std::string& sinkValueHex) VL_MT_SAFE {
         // Default no-op when causality is not wired on this trace implementation.
         (void)timeui;
         (void)sinkCode;
@@ -49,6 +52,7 @@ public:
         (void)predTimeDeltas;
         (void)predCount;
         (void)valueChanged;
+        (void)sinkValueHex;
     }
 
     // internal use only

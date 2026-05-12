@@ -68,9 +68,10 @@ static_assert(std::is_same<vlFstEnumHandle, fstEnumHandle>::value, "vlFstHandle 
 void VerilatedFstC::causalityEmitFromEval(uint64_t timeui, uint32_t sinkCode,
                                           uint32_t writeSiteId, const uint32_t* predCodes,
                                           const uint8_t* predRoles, const int8_t* predTimeDeltas,
-                                          uint32_t predCount, bool valueChanged) VL_MT_SAFE {
+                                          uint32_t predCount, bool valueChanged,
+                                          const std::string& sinkValueHex) VL_MT_SAFE {
     m_sptrace.causalityEmit(timeui, sinkCode, writeSiteId, predCodes, predRoles, predTimeDeltas,
-                            predCount, valueChanged);
+                            predCount, valueChanged, sinkValueHex);
 }
 
 //=============================================================================

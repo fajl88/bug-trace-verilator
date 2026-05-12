@@ -115,6 +115,66 @@ public:
     void reset() { m_emitted.clear(); }
 };
 
+// strict_read_v1 causality must stringify the same lvalue subexpression as the assignment target.
+// Using only the inner AstVarRef drops ArraySel/Sel/MemberSel wrappers and degenerates to
+// invalid casts on VlUnpacked-backed signals (regression vs pre-refactor trace-only emission).
+static const AstNodeExpr* strictCausalityLvalueExprForSinkRef(const AstNodeExpr* lhsp,
+                                                               const AstVarRef* targetRefp) {
+    if (!lhsp || !targetRefp) return nullptr;
+    if (lhsp == targetRefp) return lhsp;
+    if (const AstArraySel* const ap = VN_CAST(lhsp, ArraySel)) {
+        if (strictCausalityLvalueExprForSinkRef(ap->fromp(), targetRefp)) {
+            return lhsp;
+        }
+        return nullptr;
+    }
+    if (const AstSel* const sp = VN_CAST(lhsp, Sel)) {
+        if (strictCausalityLvalueExprForSinkRef(sp->fromp(), targetRefp)) {
+            return lhsp;
+        }
+        return nullptr;
+    }
+    if (const AstMemberSel* const mp = VN_CAST(lhsp, MemberSel)) {
+        if (strictCausalityLvalueExprForSinkRef(mp->fromp(), targetRefp)) {
+            return lhsp;
+        }
+        return nullptr;
+    }
+    if (const AstStructSel* const stp = VN_CAST(lhsp, StructSel)) {
+        if (strictCausalityLvalueExprForSinkRef(stp->fromp(), targetRefp)) {
+            return lhsp;
+        }
+        return nullptr;
+    }
+    if (const AstCCast* const cp = VN_CAST(lhsp, CCast)) {
+        if (strictCausalityLvalueExprForSinkRef(cp->lhsp(), targetRefp)) {
+            return lhsp;
+        }
+        return nullptr;
+    }
+    if (const AstReplicate* const rp = VN_CAST(lhsp, Replicate)) {
+        if (strictCausalityLvalueExprForSinkRef(VN_CAST(rp->op1p(), NodeExpr), targetRefp)) {
+            return lhsp;
+        }
+        return nullptr;
+    }
+    if (const AstConcat* const cp = VN_CAST(lhsp, Concat)) {
+        if (const AstNodeExpr* const hit
+            = strictCausalityLvalueExprForSinkRef(VN_CAST(cp->op1p(), NodeExpr), targetRefp)) {
+            return hit;
+        }
+        return strictCausalityLvalueExprForSinkRef(VN_CAST(cp->op2p(), NodeExpr), targetRefp);
+    }
+    if (const AstConcatN* const cp = VN_CAST(lhsp, ConcatN)) {
+        if (const AstNodeExpr* const hit
+            = strictCausalityLvalueExprForSinkRef(VN_CAST(cp->op1p(), NodeExpr), targetRefp)) {
+            return hit;
+        }
+        return strictCausalityLvalueExprForSinkRef(VN_CAST(cp->op2p(), NodeExpr), targetRefp);
+    }
+    return nullptr;
+}
+
 // ######################################################################
 //  Emit statements and expressions
 
@@ -373,6 +433,56 @@ class EmitCFunc VL_NOT_FINAL : public EmitCConstInit {
         recurseList(exprp->op4p());
     }
 
+    void emitStrictCausalitySinkExprValue(const AstNodeExpr* exprp) {
+        if (const AstVarRef* const refp = VN_CAST(exprp, VarRef)) {
+            if (refp->varp()->isEvent()) {
+                puts("VL_TO_STRING((");
+                iterateConst(const_cast<AstNodeExpr*>(exprp));
+                puts("))");
+                return;
+            }
+        }
+        const AstNodeDType* const dtypep = exprp->dtypep()->skipRefp();
+        if (dtypep->isDouble()) {
+            puts("VL_TO_STRING(static_cast<double>(");
+            iterateConst(const_cast<AstNodeExpr*>(exprp));
+            puts("))");
+            return;
+        }
+        const int bits = exprp->widthMin();
+        if (exprp->isWide()) {
+            puts("VL_TO_STRING_W(VL_WORDS_I(");
+            puts(cvtToStr(bits));
+            puts("), reinterpret_cast<const uint32_t*>(&(");
+            iterateConst(const_cast<AstNodeExpr*>(exprp));
+            puts(")))");
+            return;
+        }
+        if (exprp->isQuad()) {
+            puts("VL_TO_STRING(static_cast<QData>(");
+            iterateConst(const_cast<AstNodeExpr*>(exprp));
+            puts("))");
+            return;
+        }
+        if (bits > 16) {
+            puts("VL_TO_STRING(static_cast<IData>(");
+            iterateConst(const_cast<AstNodeExpr*>(exprp));
+            puts("))");
+        } else if (bits > 8) {
+            puts("VL_TO_STRING(static_cast<SData>(");
+            iterateConst(const_cast<AstNodeExpr*>(exprp));
+            puts("))");
+        } else if (bits > 1) {
+            puts("VL_TO_STRING(static_cast<CData>(");
+            iterateConst(const_cast<AstNodeExpr*>(exprp));
+            puts("))");
+        } else {
+            puts("VL_TO_STRING(static_cast<CData>(!!(");
+            iterateConst(const_cast<AstNodeExpr*>(exprp));
+            puts(")))");
+        }
+    }
+
     void emitStrictWriteSiteCausality(AstNodeAssign* nodep) {
         if (!v3Global.opt.traceCausality()) return;
         if (v3Global.opt.traceCausalityPrecisionMode() != "strict_read_v1") return;
@@ -391,13 +501,34 @@ class EmitCFunc VL_NOT_FINAL : public EmitCConstInit {
 
         const std::string siteStr = cvtToStr(nodep->traceWriteSiteId());
         for (uint32_t sinkCode : sinkCodes) {
+            AstVarRef* sinkRefp = nullptr;
+            nodep->lhsp()->foreach([&](AstVarRef* refp) {
+                if (!refp->access().isWriteOrRW()) return;
+                const uint32_t code = traceCodeForVar(refp->varp(), refp->varScopep());
+                if (code != sinkCode) return;
+                UASSERT_OBJ(!sinkRefp, refp,
+                            "strict causality: duplicate LHS VarRef for same trace sink code");
+                sinkRefp = refp;
+            });
+            UASSERT_OBJ(sinkRefp, nodep,
+                        "strict causality: sink trace code has no matching LHS VarRef");
+            const AstNodeExpr* const lhspExpr = nodep->lhsp();
+            UASSERT_OBJ(lhspExpr, nodep, "strict causality: assignment LHS must be an expression");
+            const AstNodeExpr* const valueExprp
+                = strictCausalityLvalueExprForSinkRef(lhspExpr, sinkRefp);
+            UASSERT_OBJ(valueExprp, nodep,
+                        "strict causality: sink trace ref must appear in LHS expression tree");
             const std::string suf = siteStr + "_" + cvtToStr(sinkCode);
             const std::string pcVar = "__Vws_pc_" + suf;
             const std::string prVar = "__Vws_pr_" + suf;
             const std::string pdVar = "__Vws_pd_" + suf;
             const std::string cnVar = "__Vws_cn_" + suf;
             const std::string apVar = "__Vws_ap_" + suf;
+            const std::string hexVar = "__Vws_hex_" + suf;
             puts("if (VL_UNLIKELY(vlSymsp->_vm_contextp__->causalityTraceFilep())) {\n");
+            puts("const std::string " + hexVar + " = ");
+            emitStrictCausalitySinkExprValue(valueExprp);
+            puts(";\n");
             puts("uint32_t " + pcVar + "[512];\n");
             puts("uint8_t " + prVar + "[512];\n");
             puts("int8_t " + pdVar + "[512];\n");
@@ -426,7 +557,8 @@ class EmitCFunc VL_NOT_FINAL : public EmitCConstInit {
             puts(cvtToStr(sinkCode));
             puts(", ");
             puts(siteStr);
-            puts(", " + pcVar + ", " + prVar + ", " + pdVar + ", " + cnVar + ", true);\n");
+            puts(", " + pcVar + ", " + prVar + ", " + pdVar + ", " + cnVar + ", true, " + hexVar
+                 + ");\n");
             puts("}\n");
         }
     }

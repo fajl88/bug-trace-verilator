@@ -73,9 +73,10 @@ constexpr unsigned VL_TRACE_SUFFIX_ENTRY_SIZE = 8;  // Size of a suffix entry
 void VerilatedVcdC::causalityEmitFromEval(uint64_t timeui, uint32_t sinkCode,
                                           uint32_t writeSiteId, const uint32_t* predCodes,
                                           const uint8_t* predRoles, const int8_t* predTimeDeltas,
-                                          uint32_t predCount, bool valueChanged) VL_MT_SAFE {
+                                          uint32_t predCount, bool valueChanged,
+                                          const std::string& sinkValueHex) VL_MT_SAFE {
     m_sptrace.causalityEmit(timeui, sinkCode, writeSiteId, predCodes, predRoles, predTimeDeltas,
-                            predCount, valueChanged);
+                            predCount, valueChanged, sinkValueHex);
 }
 
 //=============================================================================

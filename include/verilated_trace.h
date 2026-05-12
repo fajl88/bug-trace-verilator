@@ -335,11 +335,12 @@ public:
     bool causalityEnabled() const VL_MT_SAFE { return m_causalityEnabled; }
     void causalityEmit(uint64_t timeui, uint32_t sinkCode, const uint32_t* predCodes,
                       const uint8_t* predRoles, const int8_t* predTimeDeltas, uint32_t predCount,
-                      bool valueChanged)
+                      bool valueChanged, const std::string& sinkValueHex)
         VL_MT_SAFE_EXCLUDES(m_mutex);
     void causalityEmit(uint64_t timeui, uint32_t sinkCode, uint32_t writeSiteId,
                       const uint32_t* predCodes, const uint8_t* predRoles,
-                      const int8_t* predTimeDeltas, uint32_t predCount, bool valueChanged)
+                      const int8_t* predTimeDeltas, uint32_t predCount, bool valueChanged,
+                      const std::string& sinkValueHex)
         VL_MT_SAFE_EXCLUDES(m_mutex);
 };
 
@@ -389,15 +390,16 @@ public:
     bool causalityEnabled() const { return this->m_owner.causalityEnabled(); }
     void causalityEmit(uint64_t timeui, uint32_t sinkCode, const uint32_t* predCodes,
                       const uint8_t* predRoles, const int8_t* predTimeDeltas,
-                      uint32_t predCount, bool valueChanged) {
+                      uint32_t predCount, bool valueChanged, const std::string& sinkValueHex) {
         this->m_owner.causalityEmit(timeui, sinkCode, predCodes, predRoles, predTimeDeltas,
-                                    predCount, valueChanged);
+                                    predCount, valueChanged, sinkValueHex);
     }
     void causalityEmit(uint64_t timeui, uint32_t sinkCode, uint32_t writeSiteId,
                       const uint32_t* predCodes, const uint8_t* predRoles,
-                      const int8_t* predTimeDeltas, uint32_t predCount, bool valueChanged) {
+                      const int8_t* predTimeDeltas, uint32_t predCount, bool valueChanged,
+                      const std::string& sinkValueHex) {
         this->m_owner.causalityEmit(timeui, sinkCode, writeSiteId, predCodes, predRoles,
-                                    predTimeDeltas, predCount, valueChanged);
+                                    predTimeDeltas, predCount, valueChanged, sinkValueHex);
     }
 
     // Write to previous value buffer value and emit trace entry.

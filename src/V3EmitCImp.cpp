@@ -787,6 +787,49 @@ class EmitCTrace final : public EmitCFunc {
         return -1;
     }
 
+    void emitTraceCausalityValueExpr(const AstTraceInc* nodep, int arrayindex, const string& stype) {
+        const int bits = nodep->declp()->widthMin();
+        if (stype == "Double") {
+            puts("VL_TO_STRING(static_cast<double>(");
+            emitTraceValue(nodep, arrayindex);
+            puts("))");
+        } else if (stype == "WData") {
+            puts("VL_TO_STRING_W(VL_WORDS_I(");
+            puts(cvtToStr(bits));
+            puts("), reinterpret_cast<const uint32_t*>(&(");
+            emitTraceValue(nodep, arrayindex);
+            puts(")))");
+        } else if (stype == "QData") {
+            puts("VL_TO_STRING(static_cast<QData>(");
+            emitTraceValue(nodep, arrayindex);
+            puts("))");
+        } else if (stype == "IData") {
+            puts("VL_TO_STRING(static_cast<IData>(");
+            emitTraceValue(nodep, arrayindex);
+            puts("))");
+        } else if (stype == "SData") {
+            puts("VL_TO_STRING(static_cast<SData>(");
+            emitTraceValue(nodep, arrayindex);
+            puts("))");
+        } else if (stype == "CData") {
+            puts("VL_TO_STRING(static_cast<CData>(");
+            emitTraceValue(nodep, arrayindex);
+            puts("))");
+        } else if (stype == "Bit") {
+            puts("VL_TO_STRING(static_cast<CData>(!!(");
+            emitTraceValue(nodep, arrayindex);
+            puts(")))");
+        } else if (stype == "Event") {
+            puts("VL_TO_STRING((");
+            emitTraceValue(nodep, arrayindex);
+            puts("))");
+        } else {
+            puts("([]() -> std::string { VL_FATAL_MT(__FILE__, __LINE__, \"\", "
+                 "\"trace causality schema v4: unsupported sink type for value serialization\"); "
+                 "return std::string{\"0x0\"}; })()");
+        }
+    }
+
     void emitTraceChangeOne(AstTraceInc* nodep, int arrayindex) {
         // Note: Both VTraceType::CHANGE and VTraceType::FULL use the 'full' methods
         const std::string func = nodep->traceType() == VTraceType::CHANGE ? "chg" : "full";
@@ -874,13 +917,16 @@ class EmitCTrace final : public EmitCFunc {
                     puts(cvtToStr(code));
                     puts(", " + predCodesVar + ", " + predRolesVar + ", " + predDeltaVar + ", ");
                     puts(cvtToStr(predEdges.size()));
-                    puts(", " + changedVar);
+                    puts(", " + changedVar + ", ");
+                    emitTraceCausalityValueExpr(nodep, arrayindex, stype);
                     puts(");\n");
                 } else {
                     puts("bufp->causalityEmit(vlSymsp->_vm_contextp__->time(), ");
                     puts(cvtToStr(code));
                     puts(", nullptr, nullptr, nullptr, 0, ");
                     puts(changedVar);
+                    puts(", ");
+                    emitTraceCausalityValueExpr(nodep, arrayindex, stype);
                     puts(");\n");
                 }
             }

@@ -27,12 +27,57 @@
 #include "verilated_intrinsics.h"
 #include "verilated_trace.h"
 #include "verilated_threads.h"
+#include <cctype>
+#include <cstdio>
 #include <list>
 
 // clang-format on
 
 //=============================================================================
 // Static utility functions
+
+/// Write a JSON string literal (including surrounding quotes) with minimal escaping.
+static inline void vlCausalityStreamJsonString(std::ostream& os, const std::string& s) VL_MT_SAFE {
+    os << '"';
+    for (unsigned char uc : s) {
+        const char c = static_cast<char>(uc);
+        if (c == '"' || c == '\\') {
+            os << '\\' << c;
+        } else if (c == '\n') {
+            os << "\\n";
+        } else {
+            os << c;
+        }
+    }
+    os << '"';
+}
+
+/// Normalize VL_TO_STRING / hex-ish text to a canonical `0x...` lowercase token for JSON `value`.
+static inline std::string vlCausalityNormalizeHexToken(std::string s) VL_MT_SAFE {
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+    if (s.size() >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        std::string out = "0x";
+        for (size_t i = 2; i < s.size(); ++i) {
+            char c = s[i];
+            if (c == '_') continue;
+            if (c >= 'A' && c <= 'F') c = static_cast<char>(c - 'A' + 'a');
+            out.push_back(c);
+        }
+        return out.size() == 2 ? "0x0" : out;
+    }
+    if (s.size() >= 2 && s[0] == '\'' && s[1] == 'h') {
+        std::string hex;
+        for (size_t i = 2; i < s.size(); ++i) {
+            char c = s[i];
+            if (c == '_') continue;
+            if (c >= 'A' && c <= 'F') c = static_cast<char>(c - 'A' + 'a');
+            hex.push_back(c);
+        }
+        return hex.empty() ? "0x0" : "0x" + hex;
+    }
+    return s;
+}
 
 static double timescaleToDouble(const char* unitp) VL_PURE {
     char* endp = nullptr;
@@ -441,11 +486,10 @@ void VerilatedTrace<VL_SUB_T, VL_BUF_T>::configureCausality(const std::string& o
         m_causalityEnabled = false;
         return;
     }
-    m_causalityStream << "{\"event\":\"trace_causality_header\",\"version\":2,"
+    m_causalityStream << "{\"event\":\"trace_causality_header\",\"causality_header_version\":1,"
                      << "\"static_graph\":\"" << m_causalityStaticGraphPath
                      << "\",\"sink_filter\":\"" << m_causalitySinksFilter
-                     << "\",\"event_header_version\":2"
-                     << ",\"precision_mode\":\"" << m_causalityPrecisionMode << "\"}\n";
+                     << "\",\"precision_mode\":\"" << m_causalityPrecisionMode << "\"}\n";
     m_causalityStream.flush();
 }
 
@@ -456,12 +500,13 @@ void VerilatedTrace<VL_SUB_T, VL_BUF_T>::causalityEmit(uint64_t timeui, uint32_t
                                                        const uint32_t* predCodes,
                                                        const uint8_t* predRoles,
                                                        const int8_t* predTimeDeltas,
-                                                       uint32_t predCount, bool valueChanged)
+                                                       uint32_t predCount, bool valueChanged,
+                                                       const std::string& sinkValueHex)
     VL_MT_SAFE_EXCLUDES(m_mutex) {
     if (!m_causalityEnabled) return;
     const std::lock_guard<std::mutex> lock{m_causalityMutex};
     if (!m_causalityStream.is_open()) return;
-    const uint32_t schemaVer = writeSiteId ? 3U : 2U;
+    static constexpr uint32_t schemaVer = 4U;
     m_causalityStream << "{\"time\":" << timeui << ",\"sink_id\":" << sinkCode;
     if (writeSiteId) m_causalityStream << ",\"write_site_id\":" << writeSiteId;
     m_causalityStream << ",\"value_changed\":" << (valueChanged ? "true" : "false")
@@ -475,8 +520,10 @@ void VerilatedTrace<VL_SUB_T, VL_BUF_T>::causalityEmit(uint64_t timeui, uint32_t
                           << ",\"time_delta\":" << static_cast<int32_t>(predTimeDeltas[idx])
                           << "}";
     }
-    m_causalityStream << "],\"value_class\":\"known\",\"event_schema_version\":" << schemaVer
-                      << "}\n";
+    m_causalityStream << "],\"value_class\":\"known\","
+                      << "\"value\":";
+    vlCausalityStreamJsonString(m_causalityStream, vlCausalityNormalizeHexToken(sinkValueHex));
+    m_causalityStream << ",\"event_schema_version\":" << schemaVer << "}\n";
 }
 
 template <>
@@ -484,10 +531,11 @@ void VerilatedTrace<VL_SUB_T, VL_BUF_T>::causalityEmit(uint64_t timeui, uint32_t
                                                        const uint32_t* predCodes,
                                                        const uint8_t* predRoles,
                                                        const int8_t* predTimeDeltas,
-                                                       uint32_t predCount, bool valueChanged)
+                                                       uint32_t predCount, bool valueChanged,
+                                                       const std::string& sinkValueHex)
     VL_MT_SAFE_EXCLUDES(m_mutex) {
     causalityEmit(timeui, sinkCode, 0U, predCodes, predRoles, predTimeDeltas, predCount,
-                  valueChanged);
+                  valueChanged, sinkValueHex);
 }
 
 template <>
